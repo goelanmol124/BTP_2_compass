@@ -1,0 +1,24 @@
+# Python virtual environment
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Large OpenMM output files
+*.xml
+*.dcd
+*.chk
+*.chk.*.tmp
+
+# PDB snapshots generated during simulation (reproducible from notebooks)
+*.pdb
+
+# Simulation logs
+*.log
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
