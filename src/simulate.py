@@ -613,6 +613,213 @@ def add_positional_restraints(system, topology, positions, k: float) -> int:
     return n_restrained
 
 
+def _n_atom_records_in_pdb(pdb_path: Path) -> int:
+    """Count ATOM/HETATM lines (file order) without using PDBFile."""
+    n = 0
+    with open(pdb_path) as f:
+        for line in f:
+            if line.startswith(("ATOM  ", "HETATM")):
+                n += 1
+    return n
+
+
+def _first_n_atom_xyz_nm_from_pdb(pdb_path: Path, n: int) -> np.ndarray:
+    """
+    First ``n`` ATOM/HETATM Cartesian coordinates in **file order** (nm).
+
+    OpenMM's ``PDBFile`` can merge/rename duplicate atom names (e.g. two ``H``
+    on one ALA), shifting the coordinate list so it no longer matches the
+    solvated topology atom order — then re-solvation + MD hits NaNs.  Reading
+    raw PDB columns avoids that.
+    """
+    coords: list[list[float]] = []
+    with open(pdb_path) as f:
+        for line in f:
+            if line.startswith(("ATOM  ", "HETATM")):
+                try:
+                    x = float(line[30:38])
+                    y = float(line[38:46])
+                    z = float(line[46:54])
+                except ValueError:
+                    continue
+                coords.append([x, y, z])
+                if len(coords) >= n:
+                    break
+    if len(coords) < n:
+        raise ValueError(
+            f"PDB {pdb_path}: expected ≥{n} ATOM/HETATM records, found {len(coords)}"
+        )
+    # PDB uses Å; OpenMM uses nm
+    return np.ascontiguousarray(coords, dtype=np.float64) / 10.0
+
+
+def _extended_resolv_marker(output_dir: Path, prefix: str) -> Path:
+    """Written only after extended re-solvate + 2 ns NPT completes successfully."""
+    return output_dir / f"{prefix}_extended_resolv_complete"
+
+
+def equil_phase3_complete(output_dir: Path, prefix: str, label: str) -> bool:
+    """
+    True when Phase 3 artifacts exist. Extended additionally requires the
+    re-solvate marker *or* a compact-box ``npt_final`` (atom count ≪ large
+    solvated box) so we do not skip after a crash between large-box NPT and
+    compact-box re-solvate, while still accepting legacy runs without a marker.
+    """
+    fp = output_dir / f"{prefix}_{label}_npt_final.pdb"
+    fx = output_dir / f"{prefix}_{label}_npt_final.xml"
+    if not fp.exists() or not fx.exists():
+        return False
+    if label == "extended":
+        if _extended_resolv_marker(output_dir, prefix).exists():
+            return True
+        # Legacy: equil finished before marker file existed — compact box ≈ 5–8k atoms.
+        try:
+            n_at = _n_atom_records_in_pdb(fp)
+        except OSError:
+            return False
+        return n_at < 12_000
+    return True
+
+
+def _extended_resolvation_pipeline(
+    peptide_top_orig,
+    peptide_positions,
+    prefix: str,
+    label: str,
+    output_dir: Path,
+    platform,
+    final_pdb: Path,
+    final_xml: Path,
+) -> None:
+    """
+    Extract peptide → re-solvate (1.2 nm) → NPT_RESOLVATE_NS NPT;
+    overwrite ``final_pdb`` / ``final_xml`` with compact-box results.
+    """
+    section(f"[{label}] Re-solvation — compact box for production")
+    print("  Extracting equilibrated peptide → re-solvating with 1.2 nm padding.")
+    print("  Follows Kuczera et al. 2021 methodology exactly.\n")
+
+    n_pep = peptide_top_orig.getNumAtoms()
+    peptide_only_pdb = output_dir / f"{prefix}_{label}_peptide_only.pdb"
+    with open(peptide_only_pdb, "w") as f:
+        app.PDBFile.writeFile(peptide_top_orig, peptide_positions, f)
+    print(f"  Peptide-only PDB : {peptide_only_pdb}  ({n_pep} atoms, correct CHARMM names)")
+
+    forcefield_rs = app.ForceField(FF_PROTEIN, FF_WATER)
+    modeller_rs = app.Modeller(peptide_top_orig, peptide_positions)
+    modeller_rs.addSolvent(
+        forcefield_rs,
+        model=         "tip3p",
+        padding=       RESOLVATION_PADDING_NM * unit.nanometers,
+        ionicStrength= IONIC_STRENGTH_M * unit.molar,
+        neutralize=    True,
+    )
+
+    rs_solvated_pdb = output_dir / f"{prefix}_{label}_resolvated.pdb"
+    rs_xml = output_dir / f"{prefix}_{label}_resolvated.xml"
+    with open(rs_solvated_pdb, "w") as f:
+        app.PDBFile.writeFile(modeller_rs.topology, modeller_rs.positions, f)
+    print(f"  Re-solvated PDB : {rs_solvated_pdb}")
+
+    system_rs = forcefield_rs.createSystem(
+        modeller_rs.topology,
+        nonbondedMethod=     app.PME,
+        nonbondedCutoff=     NONBONDED_CUTOFF_NM * unit.nanometers,
+        switchDistance=      SWITCH_DISTANCE_NM  * unit.nanometers,
+        constraints=         app.HBonds,
+        rigidWater=          True,
+        ewaldErrorTolerance= EWALD_TOLERANCE,
+    )
+
+    n_rs = modeller_rs.topology.getNumAtoms()
+    n_rs_wat = sum(1 for r in modeller_rs.topology.residues() if r.name == "HOH")
+    print(f"  Re-solvated atoms   : {n_rs:,}  ({n_rs_wat:,} waters)")
+
+    with open(rs_xml, "w") as f:
+        f.write(XmlSerializer.serialize(system_rs))
+
+    print(f"  Running {NPT_RESOLVATE_NS} ns NPT on re-solvated system...")
+
+    system_rs_npt = XmlSerializer.deserialize(open(rs_xml).read())
+    system_rs_npt.addForce(mm.MonteCarloBarostat(
+        PRESSURE_BAR  * unit.bar,
+        TEMPERATURE_K * unit.kelvin,
+        25,
+    ))
+    integrator_rs = mm.LangevinMiddleIntegrator(
+        TEMPERATURE_K * unit.kelvin,
+        FRICTION_PS   / unit.picosecond,
+        TIMESTEP_FS   * unit.femtoseconds,
+    )
+    integrator_rs.setRandomNumberSeed(42)
+    sim_rs = app.Simulation(modeller_rs.topology, system_rs_npt, integrator_rs, platform)
+
+    rs_log = output_dir / f"{prefix}_{label}_resolvate_npt.log"
+    rs_dcd = output_dir / f"{prefix}_{label}_resolvate_npt.dcd"
+    rs_chk = output_dir / f"{prefix}_{label}_resolvate_npt.chk"
+
+    rs_resume = rs_chk.exists() and rs_chk.stat().st_size > 0
+    if rs_resume:
+        print(f"  Resuming re-solvation NPT from checkpoint: {rs_chk}")
+        sim_rs.loadCheckpoint(str(rs_chk))
+        rs_steps_done = sim_rs.currentStep
+        rs_remaining = NPT_RESOLVATE_STEPS - rs_steps_done
+        if rs_remaining <= 0:
+            print("  Re-solvation NPT already complete.")
+            rs_remaining = 0
+        else:
+            print(f"  Steps done: {rs_steps_done:,}  Remaining: {rs_remaining:,}")
+    else:
+        sim_rs.context.setPositions(modeller_rs.positions)
+        # Fresh solvated box often has vdW clashes; minimize before NPT + random velocities.
+        section(f"[{label}] Re-solvated box — pre-NPT minimization")
+        t_min_rs = time.time()
+        sim_rs.minimizeEnergy(
+            tolerance=MIN_TOLERANCE_KJ * unit.kilojoules_per_mole / unit.nanometer,
+            maxIterations=MIN_MAX_ITER,
+        )
+        print(f"  Wall time : {time.time() - t_min_rs:.1f} s\n")
+        sim_rs.context.setVelocitiesToTemperature(TEMPERATURE_K * unit.kelvin, 42)
+        rs_remaining = NPT_RESOLVATE_STEPS
+
+    if rs_remaining > 0:
+        rs_log_mode = "a" if rs_resume else "w"
+        sim_rs.reporters.append(app.StateDataReporter(
+            str(rs_log), LOG_STEPS,
+            step=True, time=True, temperature=True, density=True,
+            progress=True, remainingTime=True, totalSteps=NPT_RESOLVATE_STEPS,
+            separator="\t", append=(rs_log_mode == "a"),
+        ))
+        sim_rs.reporters.append(app.StateDataReporter(
+            sys.stdout, LOG_STEPS * 20,
+            step=True, time=True, temperature=True, density=True,
+            progress=True, remainingTime=True, totalSteps=NPT_RESOLVATE_STEPS,
+            separator="\t",
+        ))
+        sim_rs.reporters.append(app.DCDReporter(
+            str(rs_dcd), DCD_STEPS,
+            append=(rs_resume and rs_dcd.exists()),
+        ))
+        sim_rs.reporters.append(app.CheckpointReporter(str(rs_chk), CHK_STEPS))
+        sim_rs.step(rs_remaining)
+
+    rs_end = sim_rs.context.getState(
+        getPositions=True, getVelocities=True, enforcePeriodicBox=True
+    )
+    rs_density = compute_density_kgm3(system_rs_npt, sim_rs.context.getState())
+    print(f"  Re-solvated density : {rs_density:.1f} kg/m³ (target: ~990–1010)")
+
+    with open(final_pdb, "w") as f:
+        app.PDBFile.writeFile(modeller_rs.topology, rs_end.getPositions(), f)
+    with open(rs_xml) as f_in, open(final_xml, "w") as f_out:
+        f_out.write(f_in.read())
+
+    print(f"  Re-solvated final PDB : {final_pdb}")
+    print(f"  Re-solvated system XML: {final_xml}")
+
+    _extended_resolv_marker(output_dir, prefix).write_text("ok\n", encoding="ascii")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 3 — EQUILIBRATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -691,6 +898,34 @@ def run_equilibration(conf: dict, output_dir: Path, platform) -> None:
         if not path.exists():
             print(f"\nERROR: {path} not found. Run Phase 2 first.")
             return
+
+    # Large-box NPT finished but re-solvate crashed / was skipped: finish compact box only.
+    resolv_marker = _extended_resolv_marker(output_dir, prefix)
+    npt_final_early = output_dir / f"{prefix}_{label}_npt_final.pdb"
+    npt_final_xml_early = output_dir / f"{prefix}_{label}_npt_final.xml"
+    if (
+        label == "extended"
+        and peptide_top_orig is not None
+        and npt_final_early.exists()
+        and npt_final_xml_early.exists()
+        and not resolv_marker.exists()
+    ):
+        section(f"{prefix} [EXTENDED] — Resume re-solvation only (large-box NPT already done)")
+        n_pep_rs = peptide_top_orig.getNumAtoms()
+        arr_rs = _first_n_atom_xyz_nm_from_pdb(npt_final_early, n_pep_rs)
+        pep_pos_rs = unit.Quantity(arr_rs, unit.nanometer)
+        _extended_resolvation_pipeline(
+            peptide_top_orig,
+            pep_pos_rs,
+            prefix,
+            label,
+            output_dir,
+            platform,
+            npt_final_early,
+            npt_final_xml_early,
+        )
+        print(f"  [{label.upper()}] Phase 3 complete.\n")
+        return
 
     pdb = app.PDBFile(str(pdb_path))
     with open(xml_path) as f:
@@ -816,7 +1051,7 @@ def run_equilibration(conf: dict, output_dir: Path, platform) -> None:
         sim_nvt.reporters.append(app.CheckpointReporter(str(nvt_chk), CHK_STEPS))
 
         print(f"  Log → {nvt_log}  |  Traj → {nvt_dcd}  |  Ckpt → {nvt_chk}")
-        print(f"  Running {steps_remaining:,} steps...")
+        print(f"  Running {steps_remaining:,} steps...\n")
 
         t0 = time.time()
         sim_nvt.step(steps_remaining)
@@ -915,7 +1150,7 @@ def run_equilibration(conf: dict, output_dir: Path, platform) -> None:
     sim_npt.reporters.append(app.CheckpointReporter(str(npt_chk), CHK_STEPS))
 
     print(f"  Log → {npt_log}  |  Traj → {npt_dcd}  |  Ckpt → {npt_chk}")
-    print(f"  Running {npt_steps_remaining:,} steps...")
+    print(f"  Running {npt_steps_remaining:,} steps...\n")
 
     t0 = time.time()
     if npt_steps_remaining > 0:
@@ -1006,129 +1241,23 @@ def run_equilibration(conf: dict, output_dir: Path, platform) -> None:
 
     # ── Re-solvation (extended conformation only, Kuczera 2021) ──────────
     if label == "extended":
-        section(f"[{label}] Re-solvation — compact box for production")
-        print("  Extracting equilibrated peptide → re-solvating with 1.2 nm padding.")
-        print("  Follows Kuczera et al. 2021 methodology exactly.\n")
-
-        # Extract peptide-only positions from NPT final state.
-        # CRITICAL: use peptide_top_orig (never re-read via PDBFile — would
-        # rename HT1/HT2/HT3 → H/H2/H3, causing template mismatch).
-        # Peptide atoms are always first in the solvated topology (added to
-        # Modeller before addSolvent), so the first n_pep positions correspond
-        # to the peptide atoms in the same order as peptide_top_orig.
+        # Peptide atoms are first in the solvated topology (Modeller order).
         n_pep = peptide_top_orig.getNumAtoms()
-        all_positions_npt = final_state.getPositions()
-        peptide_positions = [all_positions_npt[i] for i in range(n_pep)]
-
-        peptide_only_pdb = output_dir / f"{prefix}_{label}_peptide_only.pdb"
-        with open(peptide_only_pdb, "w") as f:
-            app.PDBFile.writeFile(peptide_top_orig, peptide_positions, f)
-        print(f"  Peptide-only PDB : {peptide_only_pdb}  ({n_pep} atoms, correct CHARMM names)")
-
-        forcefield_rs = app.ForceField(FF_PROTEIN, FF_WATER)
-        modeller_rs = app.Modeller(peptide_top_orig, peptide_positions)
-        modeller_rs.addSolvent(
-            forcefield_rs,
-            model=         "tip3p",
-            padding=       RESOLVATION_PADDING_NM * unit.nanometers,
-            ionicStrength= IONIC_STRENGTH_M * unit.molar,
-            neutralize=    True,
+        all_nm = final_state.getPositions(asNumpy=True)
+        peptide_positions = unit.Quantity(
+            np.ascontiguousarray(all_nm[:n_pep], dtype=np.float64),
+            unit.nanometer,
         )
-
-        rs_solvated_pdb = output_dir / f"{prefix}_{label}_resolvated.pdb"
-        rs_xml = output_dir / f"{prefix}_{label}_resolvated.xml"
-        with open(rs_solvated_pdb, "w") as f:
-            app.PDBFile.writeFile(modeller_rs.topology, modeller_rs.positions, f)
-        print(f"  Re-solvated PDB : {rs_solvated_pdb}")
-
-        system_rs = forcefield_rs.createSystem(
-            modeller_rs.topology,
-            nonbondedMethod=     app.PME,
-            nonbondedCutoff=     NONBONDED_CUTOFF_NM * unit.nanometers,
-            switchDistance=      SWITCH_DISTANCE_NM  * unit.nanometers,
-            constraints=         app.HBonds,
-            rigidWater=          True,
-            ewaldErrorTolerance= EWALD_TOLERANCE,
+        _extended_resolvation_pipeline(
+            peptide_top_orig,
+            peptide_positions,
+            prefix,
+            label,
+            output_dir,
+            platform,
+            final_pdb,
+            final_xml,
         )
-
-        n_rs = modeller_rs.topology.getNumAtoms()
-        n_rs_wat = sum(1 for r in modeller_rs.topology.residues() if r.name == "HOH")
-        print(f"  Re-solvated atoms   : {n_rs:,}  ({n_rs_wat:,} waters)")
-
-        with open(rs_xml, "w") as f:
-            f.write(XmlSerializer.serialize(system_rs))
-
-        print(f"  Running {NPT_RESOLVATE_NS} ns NPT on re-solvated system...")
-
-        system_rs_npt = XmlSerializer.deserialize(open(rs_xml).read())
-        system_rs_npt.addForce(mm.MonteCarloBarostat(
-            PRESSURE_BAR  * unit.bar,
-            TEMPERATURE_K * unit.kelvin,
-            25,
-        ))
-        integrator_rs = mm.LangevinMiddleIntegrator(
-            TEMPERATURE_K * unit.kelvin,
-            FRICTION_PS   / unit.picosecond,
-            TIMESTEP_FS   * unit.femtoseconds,
-        )
-        integrator_rs.setRandomNumberSeed(42)
-        sim_rs = app.Simulation(modeller_rs.topology, system_rs_npt, integrator_rs, platform)
-        sim_rs.context.setPositions(modeller_rs.positions)
-        sim_rs.context.setVelocitiesToTemperature(TEMPERATURE_K * unit.kelvin, 42)
-
-        rs_log = output_dir / f"{prefix}_{label}_resolvate_npt.log"
-        rs_dcd = output_dir / f"{prefix}_{label}_resolvate_npt.dcd"
-        rs_chk = output_dir / f"{prefix}_{label}_resolvate_npt.chk"
-
-        rs_resume = rs_chk.exists() and rs_chk.stat().st_size > 0
-        if rs_resume:
-            print(f"  Resuming re-solvation NPT from checkpoint: {rs_chk}")
-            sim_rs.loadCheckpoint(str(rs_chk))
-            rs_steps_done = sim_rs.context.getState().getStepCount()
-            rs_remaining = NPT_RESOLVATE_STEPS - rs_steps_done
-            if rs_remaining <= 0:
-                print("  Re-solvation NPT already complete.")
-                rs_remaining = 0
-            else:
-                print(f"  Steps done: {rs_steps_done:,}  Remaining: {rs_remaining:,}")
-        else:
-            rs_remaining = NPT_RESOLVATE_STEPS
-
-        if rs_remaining > 0:
-            rs_log_mode = "a" if rs_resume else "w"
-            sim_rs.reporters.append(app.StateDataReporter(
-                str(rs_log), LOG_STEPS,
-                step=True, time=True, temperature=True, density=True,
-                progress=True, remainingTime=True, totalSteps=NPT_RESOLVATE_STEPS,
-                separator="\t", append=(rs_log_mode == "a"),
-            ))
-            sim_rs.reporters.append(app.StateDataReporter(
-                sys.stdout, LOG_STEPS * 20,
-                step=True, time=True, temperature=True, density=True,
-                progress=True, remainingTime=True, totalSteps=NPT_RESOLVATE_STEPS,
-                separator="\t",
-            ))
-            sim_rs.reporters.append(app.DCDReporter(
-                str(rs_dcd), DCD_STEPS,
-                append=(rs_resume and rs_dcd.exists()),
-            ))
-            sim_rs.reporters.append(app.CheckpointReporter(str(rs_chk), CHK_STEPS))
-            sim_rs.step(rs_remaining)
-
-        rs_end = sim_rs.context.getState(
-            getPositions=True, getVelocities=True, enforcePeriodicBox=True
-        )
-        rs_density = compute_density_kgm3(system_rs_npt, sim_rs.context.getState())
-        print(f"  Re-solvated density : {rs_density:.1f} kg/m³ (target: ~990–1010)")
-
-        # Overwrite final_pdb and final_xml with re-solvated results
-        with open(final_pdb, "w") as f:
-            app.PDBFile.writeFile(modeller_rs.topology, rs_end.getPositions(), f)
-        with open(rs_xml) as f_in, open(final_xml, "w") as f_out:
-            f_out.write(f_in.read())
-
-        print(f"  Re-solvated final PDB : {final_pdb}")
-        print(f"  Re-solvated system XML: {final_xml}")
 
     print(f"  [{label.upper()}] Phase 3 complete.\n")
 
@@ -1456,15 +1585,17 @@ def run_system(
     # ── Phase 3: Equilibration ────────────────────────────────────────────
     if phases in ("equil", "all"):
         all_equil_done = all(
-            (output_dir / f"{prefix}_{label}_npt_final.pdb").exists()
-            and (output_dir / f"{prefix}_{label}_npt_final.xml").exists()
-            for _, _, label in conformation_defs
+            equil_phase3_complete(output_dir, prefix, lab)
+            for _, _, lab in conformation_defs
         )
 
         if all_equil_done:
             section(f"{prefix} — PHASE 3: EQUILIBRATION (skipped; cached results found)")
             print(f"  All Phase 3 final PDB/XML outputs already exist in {output_dir}.")
-            print(f"  Delete *_npt_final.pdb / .xml to force re-run.\n")
+            print(
+                f"  Extended: also requires `{prefix}_extended_resolv_complete` after re-solvate.\n"
+                f"  Delete *_npt_final.* and/or that marker to force re-run.\n"
+            )
         else:
             section(f"{prefix} — PHASE 3: EQUILIBRATION")
             print(f"  Timestep    : {TIMESTEP_FS} fs")
@@ -1478,9 +1609,7 @@ def run_system(
             platform = get_best_platform()
 
             for phi, psi, label in conformation_defs:
-                final_pdb = output_dir / f"{prefix}_{label}_npt_final.pdb"
-                final_xml = output_dir / f"{prefix}_{label}_npt_final.xml"
-                if final_pdb.exists() and final_xml.exists():
+                if equil_phase3_complete(output_dir, prefix, label):
                     print(f"  [{label}] Phase 3 already complete (files exist). Skipping.")
                     continue
 
