@@ -205,17 +205,21 @@ def featurize(traj_protein: "mdtraj.Trajectory") -> np.ndarray:
     """
     import mdtraj as md
 
-    _, phi = md.compute_phi(traj_protein)   # (n_frames, 10), radians
-    _, psi = md.compute_psi(traj_protein)   # (n_frames, 10), radians
+    _, phi = md.compute_phi(traj_protein)   # (n_frames, 9) or (n_frames, 10)
+    _, psi = md.compute_psi(traj_protein)
 
-    assert phi.shape[1] == 10, (
-        f"Expected 10 phi angles, got {phi.shape[1]}. "
-        "Ensure the trajectory is protein-only with ACE/NME caps included."
-    )
-    assert psi.shape[1] == 10, (
-        f"Expected 10 psi angles, got {psi.shape[1]}. "
-        "Ensure the trajectory is protein-only with ACE/NME caps included."
-    )
+    # 10-residue chain: MDTraj gives 9 φ (res 2–10) and 9 ψ (res 1–9).
+    if phi.shape[1] == 9 and psi.shape[1] == 9:
+        n = phi.shape[0]
+        phi10 = np.zeros((n, 10), dtype=np.float64)
+        psi10 = np.zeros((n, 10), dtype=np.float64)
+        phi10[:, 1:] = phi
+        psi10[:, :-1] = psi
+        phi, psi = phi10, psi10
+    elif phi.shape[1] != 10 or psi.shape[1] != 10:
+        raise ValueError(
+            f"Expected 9 (padded to 10) or 10 φ/ψ columns; got phi {phi.shape}, psi {psi.shape}"
+        )
 
     return np.concatenate(
         [np.sin(phi), np.cos(phi), np.sin(psi), np.cos(psi)],

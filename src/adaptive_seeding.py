@@ -15,7 +15,7 @@ of SEED_NS nanoseconds each:
   Strategy 3 — Native TICA:
       A8Q2 TIC-1 re-trained each iteration (deferred to iteration 3). Falls
       back to N_HB as a stand-in CV for iterations 1–2, and on subsequent
-      iterations if TICA validation fails (block bootstrap cosine_sim < 0.90
+      iterations if TICA validation fails (block bootstrap min |cos θ| < 0.90
       or |r(TIC-1, N_HB)| < 0.70). Which CV was actually used is logged.
 
 Initialization (HTMD generator approach, no pilot run):
@@ -55,6 +55,11 @@ from src.config import (
     NONBONDED_CUTOFF_NM,
     SWITCH_DISTANCE_NM,
     EWALD_TOLERANCE,
+    TICA_MIN_LAG_FRAMES,
+    TICA_EPSILON,
+    TICA_SCALING,
+    TICA_BOOTSTRAP_BLOCK_SIZE,
+    TICA_N_BOOTSTRAP,
 )
 
 # ---------------------------------------------------------------------------
@@ -366,8 +371,8 @@ def project_cv(
 def _featurize_trajectory(traj_dcd: str, top_pdb: str) -> tuple[np.ndarray, np.ndarray]:
     """Load a DCD trajectory and compute 40-D sin/cos torsion features.
 
-    Also computes per-frame N_HB (backbone hydrogen bond count) for use as the
-    native TICA fallback CV in iterations 1–2.
+    Also computes per-frame N_HB via ``analysis.compute_nhb`` (i→i+4 backbone
+    bonds, same definition as Phase 5 / production analysis).
 
     Parameters
     ----------
@@ -382,28 +387,14 @@ def _featurize_trajectory(traj_dcd: str, top_pdb: str) -> tuple[np.ndarray, np.n
     features : np.ndarray
         Shape (n_frames, 40), sin/cos backbone torsion features.
     nhb : np.ndarray
-        Shape (n_frames,), backbone N–H ··· O=C hydrogen bond counts.
+        Shape (n_frames,), i→i+4 backbone H-bond counts (float for downstream use).
     """
-    import mdtraj as md
-    from src.utils import featurize
+    from src.analysis import compute_featurization, compute_nhb, load_trajectory
 
-    traj_full = md.load_dcd(traj_dcd, top=top_pdb)
-    traj_prot = traj_full.atom_slice(traj_full.topology.select("protein"))
-
-    features = featurize(traj_prot)
-
-    # N_HB: count backbone H-bonds per frame using Baker-Hubbard criterion
-    hbonds_per_frame = np.zeros(len(traj_prot), dtype=float)
-    try:
-        # md.baker_hubbard returns array of (donor_idx, H_idx, acceptor_idx)
-        # We compute it on each frame individually for per-frame counts
-        for i in range(len(traj_prot)):
-            hb = md.baker_hubbard(traj_prot[i], freq=0.0, periodic=False)
-            hbonds_per_frame[i] = len(hb)
-    except Exception as exc:
-        log.warning("N_HB computation failed (%s); using zeros.", exc)
-
-    return features, hbonds_per_frame
+    traj_prot = load_trajectory(traj_dcd, top_pdb, protein_only=True)
+    features = compute_featurization(traj_prot)
+    nhb = compute_nhb(traj_prot).astype(np.float64)
+    return features, nhb
 
 
 def _pool_trajectories(
@@ -458,7 +449,7 @@ def _try_train_native_tica(
     features_pool: np.ndarray,
     nhb_pool: np.ndarray,
     iteration: int,
-    lag: int = 3,
+    lag: Optional[int] = None,
     n_components: int = 5,
     rng_seed: Optional[int] = None,
 ) -> tuple[Optional[object], str]:
@@ -481,8 +472,9 @@ def _try_train_native_tica(
         Shape (n_frames,). Corresponding N_HB values.
     iteration : int
         Current 1-indexed iteration number.
-    lag : int
-        TICA lag time in frames (1 frame = 100 ps → lag=3 → 300 ps).
+    lag : int or None
+        TICA lag in frames (100 ps spacing). If None, uses
+        ``config.TICA_MIN_LAG_FRAMES`` (aligned with production policy).
     n_components : int
         Number of TICA components to compute.
     rng_seed : int or None
@@ -511,27 +503,33 @@ def _try_train_native_tica(
         )
         return None, "nhb"
 
-    # --- Train TICA ---
-    tica_model = TICA(lagtime=lag, dim=n_components)
+    lag_eff = TICA_MIN_LAG_FRAMES if lag is None else lag
+
+    # --- Train TICA (epsilon/scaling match Phase 6 / tica_train defaults) ---
+    tica_model = TICA(
+        lagtime=lag_eff,
+        dim=n_components,
+        epsilon=TICA_EPSILON,
+        scaling=TICA_SCALING,
+    )
     try:
         tica_model = tica_model.fit(features_pool).fetch_model()
     except Exception as exc:
         log.warning("[native TICA] Training failed (%s); using N_HB fallback.", exc)
         return None, "nhb"
 
-    # --- Validation (a): block bootstrap cosine similarity ---
+    # --- Validation (a): block bootstrap — worst-case min |cos θ| vs threshold ---
     cosine_sim: float = 0.0
     if _TICA_TRAIN_AVAILABLE:
         try:
-            cosine_sim = float(
-                block_bootstrap_tic1_stability(
-                    features_pool,
-                    lag=lag,
-                    n_blocks=10,
-                    n_bootstrap=50,
-                    rng_seed=rng_seed,
-                )
+            boot = block_bootstrap_tic1_stability(
+                features_pool,
+                lagtime=lag_eff,
+                block_size=TICA_BOOTSTRAP_BLOCK_SIZE,
+                n_bootstrap=TICA_N_BOOTSTRAP,
+                rng_seed=rng_seed if rng_seed is not None else 42,
             )
+            cosine_sim = float(boot["min_cos_sim"])
         except Exception as exc:
             log.warning(
                 "[native TICA] Block bootstrap failed (%s); treating cosine_sim=0.",

@@ -653,6 +653,64 @@ def _first_n_atom_xyz_nm_from_pdb(pdb_path: Path, n: int) -> np.ndarray:
     return np.ascontiguousarray(coords, dtype=np.float64) / 10.0
 
 
+def _npt_final_topology_positions_box(
+    pdb_path: Path,
+    n_particles: int,
+) -> tuple:
+    """Load NPT-final solvated PDB for Phase 4 cold start.
+
+    OpenMM's ``PDBFile`` merges atoms that share a residue + name (e.g. two
+    backbone ``H`` on CHARMM ALA), producing **fewer** atoms than the
+    serialized ``System`` XML (4830 vs 4829) and breaking ``setPositions``.
+    MDTraj keeps every ATOM record and matches the XML particle count.
+
+    Returns
+    -------
+    topology : openmm.app.Topology
+    positions : openmm.unit.Quantity
+    box_vecs : tuple[Vec3, Vec3, Vec3] | None
+        Periodic box edge vectors in nm, or None if not found (caller errors).
+    """
+    from openmm import Vec3, unit
+
+    pdb_path = Path(pdb_path)
+
+    if _MDTRAJ_AVAILABLE:
+        traj = md.load_pdb(str(pdb_path))
+        if traj.n_atoms != n_particles:
+            raise ValueError(
+                f"{pdb_path}: MDTraj loaded {traj.n_atoms} atoms but production "
+                f"system XML has {n_particles} particles — check PDB/XML pairing."
+            )
+        omm_top = traj.topology.to_openmm()
+        positions = traj.openmm_positions(0)
+        box_vecs = None
+        if traj.unitcell_vectors is not None:
+            M = traj.unitcell_vectors[0]
+            box_vecs = (
+                Vec3(float(M[0, 0]), float(M[0, 1]), float(M[0, 2])),
+                Vec3(float(M[1, 0]), float(M[1, 1]), float(M[1, 2])),
+                Vec3(float(M[2, 0]), float(M[2, 1]), float(M[2, 2])),
+            )
+        if box_vecs is None:
+            pdb_box = app.PDBFile(str(pdb_path))
+            box_vecs = pdb_box.topology.getPeriodicBoxVectors()
+        return omm_top, positions, box_vecs
+
+    pdb = app.PDBFile(str(pdb_path))
+    omm_top = pdb.topology
+    if omm_top.getNumAtoms() != n_particles:
+        raise ValueError(
+            f"{pdb_path}: PDBFile topology has {omm_top.getNumAtoms()} atoms but "
+            f"system XML has {n_particles} particles (duplicate atom names in PDB). "
+            "Install mdtraj, or regenerate the NPT-final PDB with unique atom names."
+        )
+    coords_nm = _first_n_atom_xyz_nm_from_pdb(pdb_path, n_particles)
+    positions = unit.Quantity(coords_nm, unit.nanometer)
+    box_vecs = omm_top.getPeriodicBoxVectors()
+    return omm_top, positions, box_vecs
+
+
 def _extended_resolv_marker(output_dir: Path, prefix: str) -> Path:
     """Written only after extended re-solvate + 2 ns NPT completes successfully."""
     return output_dir / f"{prefix}_extended_resolv_complete"
@@ -1306,9 +1364,10 @@ def run_production(conf: dict, output_dir: Path, platform) -> None:
     1. Check if ``{PREFIX}_{label}_prod.chk`` exists and is non-empty.
     2. If yes: load checkpoint, read ``currentStep``, compute remaining steps.
     3. If remaining ≤ 0: print "already complete" and return.
-    4. If no checkpoint: set positions from NPT final PDB, draw velocities
-       from Maxwell-Boltzmann at TEMPERATURE_K, set box vectors from
-       CRYST1 record of NPT final PDB.
+    4. If no checkpoint: load topology + positions from NPT final PDB via
+       **MDTraj** when available (avoids ``PDBFile`` merging duplicate H names
+       vs the XML particle count), draw velocities from Maxwell-Boltzmann at
+       TEMPERATURE_K, set box vectors from the PDB unit cell.
 
     Parameters
     ----------
@@ -1338,11 +1397,11 @@ def run_production(conf: dict, output_dir: Path, platform) -> None:
             print(f"\n  ERROR: {path} not found. Run Phase 3 first.")
             return
 
-    pdb = app.PDBFile(str(pdb_path))
     with open(xml_path) as f:
         system_prod = XmlSerializer.deserialize(f.read())
 
     N = system_prod.getNumParticles()
+    prod_top, positions0, box_vecs = _npt_final_topology_positions_box(pdb_path, N)
     DOF = compute_dof(system_prod)
     kB = 8.314e-3
 
@@ -1354,7 +1413,7 @@ def run_production(conf: dict, output_dir: Path, platform) -> None:
     # Different seed from equilibration to decorrelate random noise sequences
     integrator_prod.setRandomNumberSeed(99)
 
-    sim_prod = app.Simulation(pdb.topology, system_prod, integrator_prod, platform)
+    sim_prod = app.Simulation(prod_top, system_prod, integrator_prod, platform)
 
     prod_log = output_dir / f"{prefix}_{label}_prod.log"
     prod_dcd = output_dir / f"{prefix}_{label}_prod.dcd"
@@ -1384,17 +1443,16 @@ def run_production(conf: dict, output_dir: Path, platform) -> None:
             f"({steps_remaining / STEPS_PER_PS / 1e6:.4f} µs)."
         )
     else:
-        # Seed from Phase 3 NPT final state
-        sim_prod.context.setPositions(pdb.positions)
+        # Seed from Phase 3 NPT final state (topology/positions via MDTraj when
+        # available — avoids PDBFile dropping duplicate-named hydrogens).
+        sim_prod.context.setPositions(positions0)
         sim_prod.context.setVelocitiesToTemperature(TEMPERATURE_K * unit.kelvin, 99)
-        # Box vectors from CRYST1 record of NPT final PDB
-        _box = pdb.topology.getPeriodicBoxVectors()
-        if _box is None:
+        if box_vecs is None:
             raise ValueError(
                 f"No periodic box vectors found in {pdb_path}. "
                 "Re-run Phase 3 to regenerate the NPT final PDB with a CRYST1 record."
             )
-        sim_prod.context.setPeriodicBoxVectors(*_box)
+        sim_prod.context.setPeriodicBoxVectors(*box_vecs)
         print(f"\n  Starting production from scratch ({PROD_STEPS:,} steps).")
 
     # ── WRITE TOPOLOGY PDB BEFORE STARTING THE DCD REPORTER ──────────────

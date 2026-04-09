@@ -304,12 +304,24 @@ RT_KCAL: float = 0.6558
 # TICA PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-TICA_LAGTIME_FRAMES_SCAN: list = [1, 2, 3, 5, 8, 10, 15, 20]
+TICA_LAGTIME_FRAMES_SCAN: list = [1, 2, 3, 5, 8, 10, 15, 20, 30, 40, 50]
 """
-Lag-time scan values in frames (100 ps/frame).
-In ns: [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0].
-Physical sweet spot: τ >> τ_fast (~0.5 ns) but τ << τ_slow (~5 ns).
-Expected plateau at 2–4 frames (0.2–0.4 ns).
+Lag-time scan in frames (100 ps/frame → 0.1 ns/frame).
+Used only for diagnostics (implied timescales vs lag); see §9.3 in the protocol notebook.
+"""
+
+TICA_MIN_LAG_FRAMES: int = 10
+"""
+Minimum lag (in frames) eligible for the **production** TICA fit.
+10 frames = 1.0 ns at 100 ps spacing — excludes sub-nanosecond backbone jitter while
+keeping τ well below the ~5–8 ns structural relaxation scale (protocol §9.3).
+"""
+
+TICA_LAG_ITS_REL_PLATEAU: float = 0.25
+"""
+When picking lag from the ITS scan: accept the first scan point L ≥ TICA_MIN_LAG_FRAMES
+whose *consecutive* implied-timescale relative change |Δt₁|/t₁ is below this threshold
+(plateau onset). If none qualify, use the consecutive pair with the smallest relative change.
 """
 
 TICA_DIM: int = 5
@@ -326,8 +338,8 @@ making Euclidean distance approximate true kinetic distance between states."""
 TICA_N_BOOTSTRAP: int = 100
 """Number of block bootstrap resamples for TIC-1 stability verification."""
 
-TICA_BOOTSTRAP_BLOCK_SIZE: int = 20
-"""Block size for bootstrap: 20 frames = 10 ns >> τ_eq ≈ 6 ns → approximately independent blocks."""
+TICA_BOOTSTRAP_BLOCK_SIZE: int = 50
+"""Block size for bootstrap: 50 frames = 5.0 ns at 100 ps — comparable to τ_eq (~5–8 ns)."""
 
 TICA_BOOTSTRAP_COS_THRESHOLD: float = 0.95
 """Minimum cosine similarity between bootstrap TIC-1 and reference TIC-1.

@@ -10,19 +10,21 @@ Physical constants
 Temperature : 330 K   →  RT = 0.6558 kcal/mol
 H-bond cutoff : 3.6 Å (0.36 nm), i→i+4 backbone O···H-N (Kuczera 2021)
 N_HB_MAX = 6
-RMSD helix threshold   : 0.20 nm
+RMSD (BB vs ideal helix, superpose Cα) helix threshold : 0.20 nm
 RMSD coil threshold    : 0.30 nm (transition 0.20–0.30 nm inherits previous state)
 DSSP helix threshold   : ≥ 50 % residues 'H'  (coil is '-', NOT 'C')
 N_HB helix threshold   : ≥ 3 bonds (50 % of 6)
 Burn-in                : first 25 ns = 250 frames at 100 ps/frame
-FES bins               : 25 × 25 on RMSD × N_HB
+FES bins               : 25 RMSD × (N_HB_MAX+1) discrete N_HB on RMSD × N_HB
 FES clip               : 5 kcal/mol
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import os
+import shutil
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -60,6 +62,25 @@ HB_CUTOFF_NM: float = 0.36             # 3.6 Å in nm
 # ─── FES parameters ──────────────────────────────────────────────────────────
 FES_NBINS: int = 25
 FES_CLIP_KCAL: float = 5.0
+
+
+def _nhb_bin_edges() -> np.ndarray:
+    """Half-integer edges so each integer count 0..N_HB_MAX maps to one bin."""
+    return np.arange(-0.5, N_HB_MAX + 1.5, 1.0)
+
+
+def _rmsd_bin_edges(rmsd: np.ndarray, nbins: int) -> np.ndarray:
+    """RMSD bin edges for 2D FES / JSD; widens degenerate ranges so histogram2d is valid."""
+    r = np.asarray(rmsd, dtype=np.float64)
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return np.linspace(0.0, 1.0, nbins + 1)
+    lo, hi = float(r.min()), float(r.max())
+    if hi - lo < 1e-12:
+        pad_nm = 0.5
+        lo -= pad_nm
+        hi += pad_nm
+    return np.linspace(lo, hi, nbins + 1)
 
 # ─── matplotlib style ────────────────────────────────────────────────────────
 matplotlib.rcParams.update(
@@ -117,15 +138,19 @@ def compute_backbone_rmsd(
     traj_protein: "md.Trajectory",
     ref_frame_index: int = 0,
 ) -> np.ndarray:
-    """Backbone Cα RMSD to a reference frame (default: first frame), in nm.
+    """Cα-only RMSD to a trajectory frame (default: first frame), in nm.
 
     Superposes every frame on the Cα atoms of the reference frame then
     computes per-frame RMSD using the same Cα atom set.
 
+    Prefer :func:`compute_backbone_rmsd_to_ideal_helix` for helix–coil order
+    parameters so RMSD measures deviation from ideal geometry, not from an
+    arbitrary post–burn-in snapshot.
+
     Parameters
     ----------
     traj_protein    : protein-only MDTraj trajectory
-    ref_frame_index : index of the frame used as the helix reference
+    ref_frame_index : index of the frame used as the reference
 
     Returns
     -------
@@ -136,12 +161,114 @@ def compute_backbone_rmsd(
     ca_idx = traj_protein.topology.select("name CA")
     ref = traj_protein[ref_frame_index]
     traj_protein.superpose(ref, atom_indices=ca_idx, ref_atom_indices=ca_idx)
-    return md.compute_rmsd(
+    # MDTraj ≥1.10 exposes ``rmsd``; ``compute_rmsd`` was removed.
+    return md.rmsd(
         traj_protein,
         ref,
+        frame=0,
         atom_indices=ca_idx,
         ref_atom_indices=ca_idx,
         precentered=True,
+        superpose=False,
+    )
+
+
+def load_helix_reference_traj(helix_ref_pdb: str) -> "md.Trajectory":
+    """Load in-vacuo ideal-helix PDB and slice to the same protein selection as production.
+
+    Uses the same ``protein or resname ACE or resname NME`` rule as
+    :func:`load_trajectory` so atom ordering matches ``prod_top.pdb``.
+
+    Parameters
+    ----------
+    helix_ref_pdb : path to single-structure PDB (e.g. ``A10_helix.pdb``)
+
+    Returns
+    -------
+    ref : MDTraj Trajectory with exactly one frame
+    """
+    import mdtraj as md
+
+    path = Path(helix_ref_pdb)
+    if not path.is_file():
+        raise FileNotFoundError(f"Helix reference PDB not found: {path.resolve()}")
+
+    ref = md.load_pdb(str(path))
+    sel = ref.topology.select("protein or resname ACE or resname NME")
+    ref = ref.atom_slice(sel)
+    if ref.n_frames < 1:
+        raise ValueError(f"No coordinates in helix reference: {path}")
+    return ref[0:1]
+
+
+def compute_backbone_rmsd_to_ideal_helix(
+    traj_protein: "md.Trajectory",
+    helix_ref_pdb: str,
+) -> np.ndarray:
+    """Backbone heavy-atom RMSD to ideal helix (N, CA, C, O), in nm.
+
+    Superposes each frame onto the reference using **Cα** atoms only, then
+    computes RMSD over all **backbone** atoms (MDTraj ``backbone`` selection)
+    vs the same atoms in the helix PDB. This matches the protocol / Kuczera-style
+    “distance to helix” coordinate; thresholds in ``RMSD_HELIX_NM`` / ``RMSD_COIL_NM``
+    are interpreted in this sense.
+
+    Does not mutate ``traj_protein`` (works on a coordinate copy).
+
+    Parameters
+    ----------
+    traj_protein   : protein-only trajectory (post–burn-in), same composition as ref
+    helix_ref_pdb  : path to variant-specific ideal helix (``A10_helix.pdb`` or
+                     ``A8Q2_helix.pdb``)
+
+    Returns
+    -------
+    rmsd_nm : (n_frames,) RMSD in nanometres
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``helix_ref_pdb`` is missing.
+    ValueError
+        If residue count or backbone/Cα atom counts do not match the reference.
+    """
+    import mdtraj as md
+
+    ref1 = load_helix_reference_traj(helix_ref_pdb)
+    top_t, top_r = traj_protein.topology, ref1.topology
+
+    if top_t.n_residues != top_r.n_residues:
+        raise ValueError(
+            f"Residue count mismatch: trajectory has {top_t.n_residues} residues, "
+            f"helix reference has {top_r.n_residues}. Use the matching *_helix.pdb."
+        )
+
+    ca_t = top_t.select("name CA")
+    ca_r = top_r.select("name CA")
+    bb_t = top_t.select("backbone")
+    bb_r = top_r.select("backbone")
+
+    if len(ca_t) != len(ca_r):
+        raise ValueError(
+            f"Cα count mismatch: trajectory {len(ca_t)} vs helix ref {len(ca_r)}."
+        )
+    if len(bb_t) != len(bb_r):
+        raise ValueError(
+            f"Backbone atom count mismatch: trajectory {len(bb_t)} vs helix ref {len(bb_r)}."
+        )
+
+    xyz = np.array(traj_protein.xyz, dtype=np.float64, order="C", copy=True)
+    work = md.Trajectory(xyz=xyz, topology=traj_protein.topology)
+    work.superpose(ref1, frame=0, atom_indices=ca_t, ref_atom_indices=ca_r)
+
+    return md.rmsd(
+        work,
+        ref1,
+        frame=0,
+        atom_indices=bb_t,
+        ref_atom_indices=bb_r,
+        precentered=True,
+        superpose=False,
     )
 
 
@@ -225,11 +352,26 @@ def compute_nhb(
     return np.clip(formed.sum(axis=1), 0, N_HB_MAX)
 
 
-def compute_dssp(traj_protein: "md.Trajectory") -> np.ndarray:
+def compute_dssp(
+    traj_protein: "md.Trajectory",
+    scratch_dir: Optional[str] = None,
+) -> np.ndarray:
     """Per-residue DSSP assignment using MDAnalysis 2.8+ Kabsch-Sander algorithm.
 
     Requires MDAnalysis >= 2.8.0.  The trajectory must be written to a
     temporary DCD + PDB so MDAnalysis can load it.
+
+    On Windows, the trajectory reader must be closed before removing the temp
+    directory; otherwise cleanup hits WinError 32 (file still in use).
+
+    Parameters
+    ----------
+    traj_protein
+        Protein-only MDTraj trajectory.
+    scratch_dir
+        If set, PDB/DCD are written under ``scratch_dir / _mda_dssp_<pid>`` and
+        removed after DSSP.  Prefer the analysis ``output_dir`` on Windows so
+        files live on the same volume as outputs.
 
     Returns
     -------
@@ -237,21 +379,36 @@ def compute_dssp(traj_protein: "md.Trajectory") -> np.ndarray:
                  IMPORTANT: coil is '-', NOT 'C'.
     """
     import tempfile
+
     import MDAnalysis as mda
     from MDAnalysis.analysis.dssp import DSSP
 
-    # Write protein-only trajectory to temporary files for MDAnalysis
-    with tempfile.TemporaryDirectory() as tmpdir:
-        top_tmp = os.path.join(tmpdir, "top.pdb")
-        dcd_tmp = os.path.join(tmpdir, "traj.dcd")
+    if scratch_dir:
+        base = Path(scratch_dir) / f"_mda_dssp_{os.getpid()}"
+        base.mkdir(parents=True, exist_ok=True)
+        tmpdir = str(base)
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="mda_dssp_")
+
+    top_tmp = os.path.join(tmpdir, "top.pdb")
+    dcd_tmp = os.path.join(tmpdir, "traj.dcd")
+    u = None
+    try:
         traj_protein[0].save_pdb(top_tmp)
         traj_protein.save_dcd(dcd_tmp)
 
         u = mda.Universe(top_tmp, dcd_tmp)
         protein_ag = u.select_atoms("protein")
         run = DSSP(protein_ag).run()
+        out = np.array(run.results.dssp, dtype=object, copy=True)
+    finally:
+        if u is not None:
+            u.trajectory.close()
+            del u
+        gc.collect()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
-    return run.results.dssp  # (n_frames, n_residues), dtype=object, coil='-'
+    return out
 
 
 def compute_helix_fraction_dssp(dssp_array: np.ndarray) -> np.ndarray:
@@ -274,6 +431,10 @@ def compute_featurization(traj_protein: "md.Trajectory") -> np.ndarray:
     Feature order: [sin(phi)×10, cos(phi)×10, sin(psi)×10, cos(psi)×10]
     All features are in [-1, +1] (no standardization needed).
 
+    MDTraj returns (n_frames, 9) φ and ψ for a 10-residue linear chain (no φ on
+    residue 1, no ψ on residue 10).  We pad to 10 angles each with zeros so the
+    feature width matches ``src.utils.featurize`` and the TICA pipeline.
+
     Parameters
     ----------
     traj_protein : protein-only MDTraj trajectory
@@ -284,8 +445,20 @@ def compute_featurization(traj_protein: "md.Trajectory") -> np.ndarray:
     """
     import mdtraj as md
 
-    _, phi = md.compute_phi(traj_protein)   # (n_frames, n_phi_res)
-    _, psi = md.compute_psi(traj_protein)   # (n_frames, n_psi_res)
+    _, phi = md.compute_phi(traj_protein)   # (n_frames, 9) for deca-Ala + caps
+    _, psi = md.compute_psi(traj_protein)   # (n_frames, 9)
+
+    if phi.shape[1] == 9 and psi.shape[1] == 9:
+        n = phi.shape[0]
+        phi10 = np.zeros((n, 10), dtype=np.float64)
+        psi10 = np.zeros((n, 10), dtype=np.float64)
+        phi10[:, 1:] = phi
+        psi10[:, :-1] = psi
+        phi, psi = phi10, psi10
+    elif phi.shape[1] != 10 or psi.shape[1] != 10:
+        raise ValueError(
+            f"Expected 9 or 10 backbone φ/ψ columns; got phi {phi.shape}, psi {psi.shape}"
+        )
 
     features = np.concatenate(
         [np.sin(phi), np.cos(phi), np.sin(psi), np.cos(psi)],
@@ -555,35 +728,44 @@ def compute_2d_fes(
     """2D free energy surface on RMSD × N_HB grid.
 
     FES = -RT * ln(P / P_max), minimum set to 0.  Bins with zero count are NaN.
+    N_HB uses discrete bins for integers 0..N_HB_MAX; RMSD uses ``nbins`` bins.
 
     Parameters
     ----------
     rmsd         : (n_frames,) RMSD in nm
     nhb          : (n_frames,) integer H-bond count
-    nbins        : number of bins per axis (default 25)
+    nbins        : number of RMSD bins (default 25)
     clip_kcal    : clip FES at this value in kcal/mol (default 5)
     temperature_K: simulation temperature in K
 
     Returns
     -------
     dict with keys:
-      fes        : (nbins, nbins) array in kcal/mol, NaN for empty bins
-      hist       : (nbins, nbins) raw count array
+      fes        : (nbins, N_HB_MAX+1) kcal/mol, NaN for empty bins
+      hist       : same shape as fes, raw counts
       edges_rmsd : (nbins+1,) bin edges for RMSD axis
-      edges_nhb  : (nbins+1,) bin edges for N_HB axis
-      centers_rmsd, centers_nhb : (nbins,) bin centers
+      edges_nhb  : (N_HB_MAX+2,) bin edges for N_HB axis
+      centers_rmsd, centers_nhb : bin centers per axis
     """
     RT = KB_KCAL * temperature_K
 
+    r = np.asarray(rmsd, dtype=np.float64)
+    nh = np.asarray(nhb, dtype=np.float64)
+    mask = np.isfinite(r) & np.isfinite(nh)
+    edges_rmsd = _rmsd_bin_edges(r[mask], nbins)
+    edges_nhb = _nhb_bin_edges()
+
     hist, edges_rmsd, edges_nhb = np.histogram2d(
-        rmsd, nhb.astype(float), bins=nbins
+        r[mask], nh[mask], bins=[edges_rmsd, edges_nhb]
     )
 
     h = hist.astype(float)
-    max_count = h.max()
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fes = np.where(h > 0, -RT * np.log(h / max_count), np.nan)
+    max_count = float(h.max())
+    if max_count <= 0.0:
+        fes = np.full_like(h, np.nan)
+    else:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fes = np.where(h > 0, -RT * np.log(h / max_count), np.nan)
 
     fes_clipped = np.where(np.isnan(fes), np.nan, np.clip(fes, 0.0, clip_kcal))
 
@@ -604,10 +786,13 @@ def compute_1d_fes_nhb(
 ) -> dict:
     """1D free energy surface along N_HB, marginalised over RMSD.
 
+    Uses one bin per integer N_HB in ``0..N_HB_MAX`` (``nbins`` is kept for API
+    compatibility with older callers).
+
     Parameters
     ----------
     nhb           : (n_frames,) integer H-bond count
-    nbins         : number of bins
+    nbins         : unused; discrete N_HB bins are fixed by ``N_HB_MAX``
     temperature_K : simulation temperature in K
 
     Returns
@@ -615,14 +800,21 @@ def compute_1d_fes_nhb(
     dict with keys: fes (kcal/mol), hist, centers, edges
     """
     RT = KB_KCAL * temperature_K
+    _ = nbins  # discrete N_HB axis; parameter kept for API compatibility
 
-    counts, edges = np.histogram(nhb.astype(float), bins=nbins)
+    nh = np.asarray(nhb, dtype=np.float64)
+    nh = nh[np.isfinite(nh)]
+    edges = _nhb_bin_edges()
+    counts, edges = np.histogram(nh, bins=edges)
     centers = 0.5 * (edges[:-1] + edges[1:])
 
     c = counts.astype(float)
-    max_count = c.max()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fes = np.where(c > 0, -RT * np.log(c / max_count), np.nan)
+    max_count = float(c.max())
+    if max_count <= 0.0:
+        fes = np.full_like(c, np.nan)
+    else:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fes = np.where(c > 0, -RT * np.log(c / max_count), np.nan)
 
     return {"fes": fes, "hist": counts, "centers": centers, "edges": edges}
 
@@ -844,11 +1036,9 @@ def compute_split_trajectory_jsd(
     n = len(rmsd)
     half = n // 2
 
-    # Use a fixed global bin range so both halves are on the same grid
-    rmsd_min, rmsd_max = float(rmsd.min()), float(rmsd.max())
-    nhb_min, nhb_max = float(nhb.min()), float(nhb.max())
-    rmsd_edges = np.linspace(rmsd_min, rmsd_max, nbins + 1)
-    nhb_edges = np.linspace(nhb_min, nhb_max, nbins + 1)
+    # Fixed global grid: discrete N_HB + shared RMSD edges from full trajectory
+    rmsd_edges = _rmsd_bin_edges(rmsd, nbins)
+    nhb_edges = _nhb_bin_edges()
 
     hist_a, _, _ = np.histogram2d(rmsd[:half], nhb[:half].astype(float),
                                   bins=[rmsd_edges, nhb_edges])
@@ -875,10 +1065,9 @@ def compute_two_replica_jsd(
     jsd : float in [0, 1]
     """
     all_rmsd = np.concatenate([rmsd1, rmsd2])
-    all_nhb = np.concatenate([nhb1, nhb2]).astype(float)
 
-    rmsd_edges = np.linspace(all_rmsd.min(), all_rmsd.max(), nbins + 1)
-    nhb_edges = np.linspace(all_nhb.min(), all_nhb.max(), nbins + 1)
+    rmsd_edges = _rmsd_bin_edges(all_rmsd, nbins)
+    nhb_edges = _nhb_bin_edges()
 
     hist1, _, _ = np.histogram2d(rmsd1, nhb1.astype(float),
                                   bins=[rmsd_edges, nhb_edges])
@@ -916,14 +1105,23 @@ def _plot_timeseries(
 
     is_helix = states == "H"
 
-    # Shading background
+    # Shading background (fill_between supports ``where``; axhspan does not in recent Matplotlib)
     for ax in axes:
-        ax.axhspan(0, 1, where=is_helix, alpha=0.15, color="#e63946", transform=ax.get_xaxis_transform())
+        ax.fill_between(
+            t,
+            0.0,
+            1.0,
+            where=is_helix,
+            alpha=0.15,
+            color="#e63946",
+            transform=ax.get_xaxis_transform(),
+            linewidth=0,
+        )
 
-    axes[0].plot(t, rmsd * 10, color="#333", lw=0.6, label="Cα RMSD (Å)")
+    axes[0].plot(t, rmsd * 10, color="#333", lw=0.6, label="BB RMSD vs ideal helix (Å)")
     axes[0].axhline(RMSD_HELIX_NM * 10, color="green", ls="--", lw=0.8, label="Helix threshold")
     axes[0].axhline(RMSD_COIL_NM * 10, color="orange", ls="--", lw=0.8, label="Coil threshold")
-    axes[0].set_ylabel("Cα RMSD (Å)")
+    axes[0].set_ylabel("BB RMSD vs ideal helix (Å)")
     axes[0].legend(fontsize=8, loc="upper right")
 
     axes[1].plot(t, nhb, color="#457b9d", lw=0.6)
@@ -953,15 +1151,17 @@ def _plot_2d_fes(
     fes = fes_dict["fes"]
     cx = fes_dict["centers_rmsd"] * 10  # nm → Å
     cy = fes_dict["centers_nhb"]
-    xi, yi = np.meshgrid(cx, cy, indexing="ij")
+    # indexing="xy": x varies along columns — matches histogram2d + contourf
+    xi, yi = np.meshgrid(cx, cy, indexing="xy")
+    z = np.asarray(fes).T  # Z[j,i] = fes[i,j] for RMSD bin i, N_HB bin j
 
     fig, ax = plt.subplots(figsize=(6, 5))
     levels = np.linspace(0, FES_CLIP_KCAL, 20)
-    cf = ax.contourf(xi, yi, fes, levels=levels, cmap="RdYlBu_r", extend="max")
-    ax.contour(xi, yi, fes, levels=levels, colors="k", linewidths=0.3, alpha=0.4)
+    cf = ax.contourf(xi, yi, z, levels=levels, cmap="RdYlBu_r", extend="max")
+    ax.contour(xi, yi, z, levels=levels, colors="k", linewidths=0.3, alpha=0.4)
     cbar = fig.colorbar(cf, ax=ax)
     cbar.set_label("ΔG (kcal/mol)")
-    ax.set_xlabel("Cα RMSD (Å)")
+    ax.set_xlabel("BB RMSD vs ideal helix (Å)")
     ax.set_ylabel("N_HB")
     ax.set_title(f"2D FES — {label}")
     plt.tight_layout()
@@ -1014,17 +1214,19 @@ def _plot_convergence(
     # ── (C) Split-trajectory FES (first half vs second half) ──────────────
     half = n // 2
     all_rmsd = np.concatenate([rmsd[:half], rmsd[half:]])
-    all_nhb = np.concatenate([nhb[:half], nhb[half:]])
-    rmsd_edges = np.linspace(all_rmsd.min(), all_rmsd.max(), FES_NBINS + 1)
-    nhb_edges = np.linspace(all_nhb.min(), all_nhb.max(), FES_NBINS + 1)
-
-    cx = 0.5 * (rmsd_edges[:-1] + rmsd_edges[1:]) * 10  # Å
+    rmsd_edges = _rmsd_bin_edges(all_rmsd, FES_NBINS)
+    nhb_edges = _nhb_bin_edges()
 
     def _fes_1d_nhb(nhb_subset):
-        counts, _ = np.histogram(nhb_subset.astype(float), bins=nhb_edges)
+        counts, _ = np.histogram(
+            np.asarray(nhb_subset, dtype=np.float64), bins=nhb_edges
+        )
         c = counts.astype(float)
+        m = float(c.max())
+        if m <= 0.0:
+            return np.full_like(c, np.nan)
         with np.errstate(divide="ignore", invalid="ignore"):
-            f = np.where(c > 0, -RT_KCAL * np.log(c / c.max()), np.nan)
+            f = np.where(c > 0, -RT_KCAL * np.log(c / m), np.nan)
         return f
 
     fes1 = _fes_1d_nhb(nhb[:half])
@@ -1142,7 +1344,7 @@ def analyze_system(
     Steps:
     1. Load trajectory (protein-only)
     2. Remove burn-in (first 250 frames = 25 ns)
-    3. Superpose on first post-burn-in frame for RMSD reference
+    3. Backbone RMSD vs ideal helix (``helix_ref_pdb``): superpose on Cα, RMSD on N/CA/C/O
     4. Compute RMSD, N_HB, DSSP, features
     5. Two-state classification
     6. Kinetics + ACF + block SE
@@ -1156,7 +1358,7 @@ def analyze_system(
     label        : human-readable label for plot titles
     prod_dcd     : path to production DCD
     prod_top_pdb : path to topology PDB written before DCDReporter
-    helix_ref_pdb: path to the in-vacuo helix PDB for RMSD reference
+    helix_ref_pdb: path to variant-specific ideal-helix PDB (must match ``prod_top`` composition)
     output_dir   : directory where figures and CSV will be saved
 
     Returns
@@ -1182,9 +1384,9 @@ def analyze_system(
     n_frames = traj.n_frames
     print(f"  Post burn-in frames: {n_frames}  ({n_frames * FRAME_SPACING_NS:.1f} ns)")
 
-    # ── RMSD (superpose on frame 0 of post-burn-in, i.e. ~25 ns) ──────────
-    print(f"[{prefix}] Computing Cα RMSD...")
-    rmsd = compute_backbone_rmsd(traj, ref_frame_index=0)  # nm
+    # ── RMSD vs ideal helix (backbone atoms; superpose on Cα) ───────────────
+    print(f"[{prefix}] Computing backbone RMSD vs ideal helix ({helix_ref_pdb})...")
+    rmsd = compute_backbone_rmsd_to_ideal_helix(traj, helix_ref_pdb)
 
     # ── N_HB ─────────────────────────────────────────────────────────────────
     print(f"[{prefix}] Counting helical H-bonds...")
@@ -1193,7 +1395,7 @@ def analyze_system(
     # ── DSSP ─────────────────────────────────────────────────────────────────
     print(f"[{prefix}] Running DSSP (MDAnalysis)...")
     try:
-        dssp_arr = compute_dssp(traj)
+        dssp_arr = compute_dssp(traj, scratch_dir=output_dir)
         dssp_ok = True
     except Exception as e:
         print(f"  DSSP failed: {e}. Using N_HB proxy for DSSP criterion.")
@@ -1383,10 +1585,11 @@ def compare_systems(
         fes2d = results["fes2d"]
         cx = fes2d["centers_rmsd"] * 10  # nm → Å
         cy = fes2d["centers_nhb"]
-        xi, yi = np.meshgrid(cx, cy, indexing="ij")
-        cf = ax.contourf(xi, yi, fes2d["fes"], levels=levels, cmap="RdYlBu_r", extend="max")
-        ax.contour(xi, yi, fes2d["fes"], levels=levels, colors="k", linewidths=0.3, alpha=0.4)
-        ax.set_xlabel("Cα RMSD (Å)")
+        xi, yi = np.meshgrid(cx, cy, indexing="xy")
+        z = np.asarray(fes2d["fes"]).T
+        cf = ax.contourf(xi, yi, z, levels=levels, cmap="RdYlBu_r", extend="max")
+        ax.contour(xi, yi, z, levels=levels, colors="k", linewidths=0.3, alpha=0.4)
+        ax.set_xlabel("BB RMSD vs ideal helix (Å)")
         ax.set_ylabel("N_HB")
         ax.set_title(sys_label)
         fig.colorbar(cf, ax=ax, label="ΔG (kcal/mol)")
@@ -1514,7 +1717,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--helix_ref",
         default=None,
-        help="Path to the in-vacuo helix PDB for RMSD reference.",
+        help="Path to variant-specific ideal-helix PDB (backbone RMSD after Cα superpose).",
     )
     parser.add_argument(
         "--output_dir",

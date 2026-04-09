@@ -453,23 +453,25 @@ traj = md.load_dcd(f"{PREFIX}_{label}_prod.dcd",
 # Use "protein" not "backbone" — phi/psi computation needs adjacent residue atoms (ACE/NME)
 traj_prot = traj.atom_slice(traj.topology.select("protein"))
 
-# Verify phi/psi angles are computed for all 10 residues
+# MDTraj returns (n_frames, 9) φ and ψ for a 10-residue linear chain (no φ on
+# residue 1, no ψ on residue 10).  Downstream TICA uses 40 sin/cos features:
+# pad to 10 angles per type (zeros for undefined φ₁ and ψ₁₀) — see ``src.analysis``
+# / ``src.utils``.  Do **not** assert phi.shape[1] == 10 without padding.
 _, phi = md.compute_phi(traj_prot)
 _, psi = md.compute_psi(traj_prot)
-assert phi.shape[1] == 10, f"Expected 10 phi angles, got {phi.shape[1]}"
-assert psi.shape[1] == 10, f"Expected 10 psi angles, got {psi.shape[1]}"
 ```
 
-**Burn-in removal for TICA:** Discard the first 25 ns (50 frames) = 5× τ_eq from the trajectory before any TICA computation. This removes the transient initialization phase where the system equilibrates from its starting conformation. Keeping the burn-in would bias the covariance matrix C(0) toward the starting state and produce TIC-1 eigenvectors that represent "escape from initialization" rather than the equilibrium helix-coil reaction coordinate.
+**Burn-in removal for TICA:** Discard the first **25 ns** = **250 frames** at **100 ps/frame** (≈3–5× τ_eq at 330 K) before any TICA computation. *(Earlier drafts incorrectly wrote “50 frames”; that would be only 5 ns.)* This removes the transient where the system relaxes from its starting conformation. Keeping the burn-in would bias C(0) toward the initial state and produce TIC-1 eigenvectors that represent “escape from initialization” rather than the equilibrium helix–coil coordinate.
 
 ### 8.2 Order Parameters
 
 **Backbone RMSD to ideal helix:**
 
-- Reference structure: helix starting conformation (φ = −57°, ψ = −47°)
-- Computed using MDTraj `compute_rmsd` after superimposing Cα atoms
-- Unit: Angstroms (for consistency with literature thresholds)
-- Physical meaning: global shape deviation from perfect helix
+- Reference structure: helix starting conformation (φ = −57°, ψ = −47°), in vacuo/capped PDB from Phase 1
+- Procedure: superpose each frame onto the reference using **Cα** atoms, then compute RMSD (backbone heavy atoms **N, Cα, C, O** vs the same atoms in the reference is preferred for consistency with Kuczera-style geometry; Cα-only RMSD to reference is a valid simpler proxy)
+- Implementation note: use MDTraj **`md.rmsd`** with **`precentered=True`** after **`superpose`**, not the removed `compute_rmsd` name
+- Unit: **nanometres** in code; thresholds in §8.5 are **0.20 / 0.30 nm** (equivalent to 2.0 / 3.0 Å)
+- Physical meaning: global shape deviation from the ideal helix geometry (not deviation from the first frame of the same trajectory)
 
 **Number of helical H-bonds (N_HB):**
 
@@ -507,7 +509,7 @@ assert psi.shape[1] == 10, f"Expected 10 psi angles, got {psi.shape[1]}"
 - If JSD (first half vs second half) > JSD (replica 1 vs replica 2), the trajectory is not converged
 
 **Two-replica agreement:**
-- Compute FES from helix-start and extended-start trajectories separately (after pooling across 2 replicas, each 500 ns, 1000 frames)
+- Compute FES from helix-start and extended-start trajectories separately (after pooling across 2 replicas, each 500 ns, **5000** frames at **100 ps** save interval)
 - JSD between the two replicas defines the "noise floor": a lower bound on how well any finite sample can agree with the ground truth
 - The seeding experiment's JSD must drop below this noise floor to claim "converged"
 
@@ -589,16 +591,17 @@ Biexponential fit: C(t) = A·exp(−t/τ_slow) + (1−A)·exp(−t/τ_fast)
 **Feature vector per frame:**
 
 ```python
-_, phi = md.compute_phi(traj_prot)   # shape (n_frames, 10), radians
-_, psi = md.compute_psi(traj_prot)   # shape (n_frames, 10), radians
-
+_, phi = md.compute_phi(traj_prot)   # (n_frames, 9) for 10-residue chain
+_, psi = md.compute_psi(traj_prot)   # (n_frames, 9)
+# Pad to 10 columns each (undefined φ on residue 1, undefined ψ on residue 10):
+# phi10[:, 1:] = phi; psi10[:, :-1] = psi — see ``src.analysis.compute_featurization``
 features = np.concatenate([
-    np.sin(phi), np.cos(phi),
-    np.sin(psi), np.cos(psi)
+    np.sin(phi10), np.cos(phi10),
+    np.sin(psi10), np.cos(psi10),
 ], axis=1)   # shape (n_frames, 40)
 ```
 
-**Total features:** 40 (4 per residue × 10 residues: sin(φ), cos(φ), sin(ψ), cos(ψ))
+**Total features:** 40 (4 × 10 backbone torsion channels after padding; MDTraj supplies 9 physical φ and 9 ψ per frame)
 
 **Why sin/cos encoding:** Torsion angles are periodic on [−π, +π). Raw angles have an artificial discontinuity at ±180°. The sin/cos pair produces a continuous, bounded representation in ℝ² without discontinuity. This is the standard encoding for TICA of backbone torsions (Pérez-Hernández 2013, Schwantes & Pande 2013, Sittel & Stock 2016).
 
@@ -609,9 +612,9 @@ features = np.concatenate([
 
 **No standardization:** Sin/cos features are already bounded on [−1, +1] with mean ~0. All features are dimensionally homogeneous (no mixture of units). Standardizing (mean=0, std=1) would inflate the variance of torsion angles that barely fluctuate (deeply in a basin) and suppress informative features. PyEMMA/deeptime mean-center internally; no further scaling is needed.
 
-**Burn-in removal:** Discard first 50 frames (25 ns = 5× τ_eq) before computing features for TICA. Same frames as discarded for convergence analysis.
+**Burn-in removal:** Discard first **250 frames** (**25 ns** at 100 ps/frame) before computing features for TICA. Same window as Phase 5 burn-in.
 
-**After burn-in removal:** 950 frames per replica × 2 replicas = 1900 frames for TICA training on A10.
+**After burn-in removal (500 ns production, 100 ps frames):** 5000 − 250 = **4750** frames per replica; pooling helix + extended replicas → **9500** frames for TICA training on A10 (if both replicas are pooled). Adjust counts if `PROD_US` or `DCD_INTERVAL_PS` change.
 
 ### 9.2 Frame Count Adequacy
 
@@ -619,13 +622,13 @@ features = np.concatenate([
 
 TICA solves the 40×40 generalized eigenvalue problem: C(τ)w = λC(0)w. Reliable estimation of a 40×40 matrix requires effective sample size n_eff >> 40 (Wishart-type noise). 
 
-- Raw frame count: 1900 frames  
-- Correlation time in features: τ_eq ≈ 5 ns; frame spacing: 0.5 ns → ~10 frames per τ_eq
-- Effective independent samples: n_eff ≈ 1900 / 10 = ~190
+- Raw frame count (example): **9500** frames after burn-in when **two** 500 ns replicas (5000 frames each minus 250 burn-in) are pooled for TICA  
+- Correlation time in features: τ_eq ≈ 5 ns; frame spacing: **0.1 ns** (100 ps) → **~50** correlated frames per τ_eq  
+- Effective independent samples: n_eff ≈ 9500 / 50 ≈ **190**
 - Effective sample ratio: n_eff / p = 190 / 40 = 4.75
 
 This is borderline adequate for TIC-1 (the dominant mode, with the largest eigenvalue gap) but insufficient for higher TICs. We use the following mitigations:
-- Block bootstrap on TIC-1 eigenvector: draw 100 bootstrap samples (blocks of 20 frames = 10 ns >> τ_eq); verify that TIC-1 direction is stable (cosine similarity between bootstrap samples > 0.95). See implementation below.
+- Block bootstrap on TIC-1 eigenvector: draw 100 bootstrap samples with block size **≥ ~50 frames** (≈**5 ns** at 100 ps, comparable to τ_eq) so each block is nearly decorrelated; verify TIC-1 direction is stable (cosine similarity > 0.95). See implementation below.
 - Regularization: `epsilon=1e-6` in deeptime TICA to prevent ill-conditioned C(0)
 - Validation: Pearson r(TIC-1, N_HB) ≥ 0.70 required to proceed; if not met, fallback protocol activates
 
@@ -635,11 +638,11 @@ This is borderline adequate for TIC-1 (the dominant mode, with the largest eigen
 import numpy as np
 from deeptime.decomposition import TICA
 
-def block_bootstrap_tic1_stability(features, lagtime, block_size=20,
+def block_bootstrap_tic1_stability(features, lagtime, block_size=50,
                                    n_bootstrap=100, threshold=0.95, rng_seed=42):
     """
     Verify TIC-1 eigenvector stability via block bootstrap.
-    Block size = 20 frames = 10 ns >> τ_eq ≈ 6 ns — ensures blocks are ~independent.
+    At 100 ps/frame, block_size=50 → 5 ns per block (order of τ_eq); adjust if DT changes.
     
     IMPORTANT: use scaling=None here to get raw unit eigenvectors for cosine comparison.
     scaling="kinetic_map" is only for the final production projection.
@@ -679,23 +682,23 @@ print(f"TIC-1 stable: {results['stable']} (min cos sim = {results['min_cos_sim']
 
 TICA solves: C(τ)w = λC(0)w, where the lag time τ is a hyperparameter.
 
-**Physical constraint on lag time:**
-- Must be >> τ_fast (local backbone fluctuations, ~0.1–0.5 ns): τ >> 1 frame (0.5 ns)
-- Must be << τ_slow (helix-coil transition, ~5 ns): τ << 10 frames (5 ns)
-- Sweet spot: τ ≈ 1–4 ns (2–8 frames)
+**Physical constraint on lag time** (assume **100 ps** per saved frame, **0.1 ns**):
+- Must be >> τ_fast (local backbone fluctuations, ~0.1–0.5 ns): use lag **≥ ~3–5 frames** (0.3–0.5 ns), not a single frame, so the lag skips purely local jitter.
+- Must be << τ_slow (helix–coil, ~5 ns): lag **≪ ~50 frames** (5 ns) so the model does not stride past the slow mode of interest.
+- Sweet spot (typical): **τ_lag ≈ 1–4 ns** → **10–40 frames** at 100 ps spacing.
 
 **Implied timescale scan:**
 
 For each candidate lag τ, fit TICA and compute TIC-1 implied timescale:
 t₁(τ) = −τ / ln|λ₁(τ)|
 
-Scan lags (in frames): [1, 2, 3, 5, 8, 10, 15, 20] = [0.5, 1.0, 1.5, 2.5, 4.0, 5.0, 7.5, 10.0] ns
+Scan lags (in frames), example: [5, 10, 15, 20, 30, 40, 50] → **[0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0] ns**
 
 Look for: a plateau in t₁(τ) vs τ. A plateau indicates the lag is in the Markovian regime — the slow mode is correctly captured and the choice of τ is not affecting the identified timescale.
 
-**If no clear plateau:** Use VAMP-2 score (variational approach to Markov processes) to objectively select the lag. The VAMP-2 score is a cross-validated estimate of the quality of the linear model; the lag maximizing VAMP-2 is the optimal choice. deeptime implements VAMP-2 scoring directly.
+**If no clear plateau:** Use a secondary **numerical** rule on the same ITS curve (for example: among lags with L ≥ L_min, pick the consecutive pair with the smallest relative change |Δt₁|/t₁ and take the lower lag). **Do not** rank **different** lag times by comparing raw VAMP-2 scores to each other: deeptime’s VAMP documentation states that models at different τ approximate different Koopman operators, so **VAMP scores are not comparable across lag times** (they remain useful as a per-τ diagnostic when printed alongside each fit).
 
-**Chosen lag:** Expected to be 2–4 frames (1–2 ns) based on τ_eq ≈ 5 ns at 330 K. The actual choice is determined empirically from the lag scan.
+**Chosen lag:** Often falls in the **~10–40 frame** range (**~1–4 ns**) when τ_eq ≈ 5 ns at **330 K** and Δt_save = 100 ps. The implementation (`src/tica_train.py`) enforces a minimum lag (default **10 frames = 1.0 ns**) and selects from the ITS scan as above; VAMP-2 is logged per lag for inspection only.
 
 ### 9.4 TICA Computation (deeptime)
 
@@ -708,8 +711,8 @@ tica = TICA(lagtime=chosen_lag_frames, dim=5, epsilon=1e-6,
 model = tica.fit(features_a10).fetch_model()
 
 # Extract and save — deeptime uses VAMP/Koopman naming, not legacy PyEMMA names
-singular_values  = model.singular_values           # shape (5,) — these are the TICA eigenvalues λᵢ
-eigenvectors     = model.singular_vectors_left     # shape (40, 5), columns = TIC directions
+singular_values  = model.singular_values           # may be length 40; use [:dim] for the fitted rank
+eigenvectors     = model.singular_vectors_left     # shape (40, dim); columns = TIC directions
 mean_a10         = model.mean_0                    # shape (40,) — instantaneous mean
 
 # Implied timescale from chosen lag
@@ -768,9 +771,9 @@ tic1_transferred = Z_a8q2[:, 0]                       # shape: (n_frames_a8q2,)
 
 **Why use A10 mean and not A8Q2 mean:**
 
-The TICA eigenvector was learned in the coordinate frame centered at the A10 mean feature vector. The projection `z = (x − μ_A10) · w` places the A10 trajectory origin at z=0. When projecting A8Q2, we are asking: "given the A10 helix-coil coordinate, where does A8Q2 fall on it?" This requires the same reference frame. Using the A8Q2 mean would shift the origin and give an offset TIC-1 score that is harder to interpret physically.
+The TICA eigenvector was learned in the coordinate frame centered at the A10 mean feature vector. The projection `z = (x − μ_A10) · w` places the A10 trajectory origin at z=0. When projecting A8Q2, we are asking: "given the A10 helix-coil coordinate, where does A8Q2 fall on it?" This requires the same reference frame. Using the A8Q2 mean would change the linear functional (it is no longer the same TIC-1 direction in the transferred sense) and would require a documented convention if adopted.
 
-For seeding purposes (Phase 8), however, it may be more practical to use the A8Q2 mean so that the coordinate is centered within the A8Q2 conformational space. This is noted in the seeding code.
+**Implementation (Phase 8):** `project_cv(..., strategy="transferred")` in `src/adaptive_seeding.py` always subtracts **μ_A10** (`mean_donor`). Optional centering with μ_A8Q2 is not implemented.
 
 ### 10.2 Moffett-Shukla Transfer Metrics
 
@@ -888,18 +891,18 @@ Based on Hruska et al. (J. Chem. Phys. 149, 244119, 2018) which systematically c
 
 Reliable TICA on a 40-feature system requires n_eff/p ≥ 2.5 (minimum for TIC-1 stability), where p = 40 and n_eff = total_frames / (τ_eq / frame_spacing). With τ_eq ≈ 6 ns and 100 ps spacing, each frame is decorrelated every ~60 frames. Pooled frame counts and their adequacy:
 
-| After iteration | Pooled data | n_eff | n_eff / 40 | Assessment |
-|---|---|---|---|---|
-| 1 | 240 ns / 480 frames | ~40 | ~1.0 | TIC-1 unreliable — C(0) near-singular |
-| 2 | 480 ns / 960 frames | ~80 | ~2.0 | TIC-1 marginal, bootstrap may fail |
-| 3 | 720 ns / 1440 frames | ~120 | ~3.0 | TIC-1 becoming reliable |
-| 4+ | ≥960 ns | ≥160 | ≥4.0 | Reliable, comparable to A10 TICA |
+| After iteration | Pooled data | Frames (8 seeds × 300 frames/30 ns) | n_eff ≈ frames/60 | n_eff / 40 | Assessment |
+|---|---|---|---|---|---|
+| 1 | 240 ns | 2400 | ~40 | ~1.0 | TIC-1 unreliable — C(0) near-singular |
+| 2 | 480 ns | 4800 | ~80 | ~2.0 | TIC-1 marginal, bootstrap may fail |
+| 3 | 720 ns | 7200 | ~120 | ~3.0 | TIC-1 becoming reliable |
+| 4+ | ≥960 ns | ≥9600 | ≥160 | ≥4.0 | Reliable, comparable to A10 TICA |
 
 Additionally, seeded data from iterations 1–2 is heavily coil-biased (starts from coil, τ_fold ≫ 30 ns), so TICA would capture within-coil fast modes, not the helix-coil slow mode.
 
 **Updated schedule for Strategy 3:**
-- Iterations 1–2: use N_HB as stand-in CV for bin discretization (physical observable, no training data needed).
-- Iteration 3: attempt TICA re-training on pooled data. Before using, validate: (a) block bootstrap cosine similarity > 0.90 for TIC-1; (b) |r(TIC-1, N_HB)| > 0.70. If both pass, switch to TICA. If either fails, remain on N_HB and try again at iteration 4.
+- Iterations 1–2: use N_HB as stand-in CV for bin discretization (physical observable, no training data needed). **Definition:** same as Phase 5 — `analysis.compute_nhb` (i→i+4 backbone C=O···H–N), not Baker–Hubbard counts.
+- Iteration 3: attempt TICA re-training on pooled data. Native TICA uses `epsilon` and `scaling` from `src.config` (same as production TICA) and default lag `TICA_MIN_LAG_FRAMES` unless overridden. Block bootstrap validation calls `block_bootstrap_tic1_stability` with `lagtime`, `block_size`, and `n_bootstrap` from config; the acceptance statistic is the **minimum** bootstrap |cos θ| (worst case), compared to 0.90. Also require |r(TIC-1, N_HB)| > 0.70. If both pass, switch to TICA. If either fails, remain on N_HB and try again at iteration 4.
 - Log which CV was used each iteration in the output summary.
 
 This schedule matches the behavior of Hruska et al. 2018 and HTMD, which treat early iterations as data accumulation with a heuristic CV, and only deploy the learned CV once enough diverse data exists.
@@ -965,7 +968,7 @@ After each iteration:
 
 ### 12.1 Reference FES
 
-The ground truth reference is the 2D FES computed from the full 500 ns + 500 ns (helix + extended) A8Q2 production trajectories (2000 frames total after pooling). The bin grid is fixed: 25 × 25 bins over the RMSD × N_HB space.
+The ground truth reference is the 2D FES computed from the full 500 ns + 500 ns (helix + extended) A8Q2 production trajectories. At 100 ps saved-frame spacing, each branch yields ~5000 frames before burn-in; discarding the first **250** frames (25 ns) per branch leaves **~4750** frames each, so **~9500** frames total after pooling (not 2000). The bin grid is fixed: 25 × 25 bins over the RMSD × N_HB space.
 
 The reference is defined by the masked domain:
 Ω = {bins (i,j) where ground truth count ≥ 3}
@@ -1008,6 +1011,8 @@ def compute_jsd(hist_ref, hist_sample, min_count=3):
 **What JSD means:** JSD = 0 means the sampled distribution is identical to the ground truth on the masked domain. JSD = 1 (theoretical maximum) means they are completely disjoint. Values of JSD = 0.1–0.3 are typical for partially-converged FES comparisons.
 
 **Noise floor:** Compute JSD between the two independent A8Q2 replicas (helix-start vs extended-start). This is the best achievable JSD with 500 ns of sampling. Seeding JSD must drop below this value to claim "equivalent to ground truth."
+
+**Equilibrium caveat:** Pooled trajectories from adaptive seeding are **not** independent samples from a single Boltzmann distribution unless reweighted (cf. adaptive sampling and MSM construction literature). Treat JSD, coverage, entropy, and |f_helix error| versus the long production reference as **practical** overlap / convergence diagnostics under this protocol, not as proof that the seeded ensemble equals π(x) without further analysis.
 
 ### 12.3 Exploration Coverage
 
@@ -1225,7 +1230,7 @@ Both pods run simultaneously, so the experiment completes in ~28 hours of wall c
 
 With ~190 effective independent samples and 40 features, TIC-1 is reliable but TIC-2 through TIC-5 may be noisy. The block bootstrap validation (Section 9.2) will quantify this. Higher TICs (TIC-2+) are not used in the seeding experiment; only TIC-1 is used as the CV.
 
-The lag time choice is based on the implied timescale plot, which may not show a clear plateau if the trajectory length is insufficient to observe many transitions at large lags. The VAMP-2 fallback handles this case.
+The lag time choice is based on the implied timescale plot (with a numerical fallback on |Δt₁|/t₁ between consecutive scan points). VAMP-2 is not used to rank different lag times against each other (see §9.3).
 
 ### 14.4 Seeding Experiment Statistical Limitations
 
@@ -1234,6 +1239,8 @@ The lag time choice is based on the implied timescale plot, which may not show a
 - Whether the TICA transfer is successful (if r < 0.70 for transferred TIC-1, strategy 2 may be no better than random)
 
 The experiment is designed to produce meaningful results in either case: if transfer fails, that is the scientific finding (2 mutations are enough to change the reaction coordinate). If transfer succeeds, the acceleration is quantified.
+
+Metrics in §12 (JSD, f_helix, etc.) measure agreement with the equilibrium reference trajectory; they do **not** by themselves establish that the adaptively grown ensemble is an unbiased equilibrium sample (see §12.2 equilibrium caveat).
 
 ### 14.5 MDTraj/OpenMM Topology Bookkeeping
 

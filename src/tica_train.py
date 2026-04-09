@@ -14,6 +14,14 @@ Deeptime API (NOT legacy PyEMMA names):
 
 Frame spacing: 100 ps = 0.1 ns/frame  (DCD_INTERVAL_PS = 100).
 Burn-in: 250 frames (25 ns) already stripped BEFORE features reach this module.
+
+Lag-time note (deeptime / VAMP theory)
+--------------------------------------
+VAMP-2 scores from models fit at different lag times **must not** be compared to
+pick τ — each lag approximates a different Koopman operator (deeptime VAMP tutorial:
+“Scores can not be compared across different lagtimes τ”).  Production lag is
+chosen here from **implied-timescale stability** between consecutive scan points,
+with a **minimum lag** (``config.TICA_MIN_LAG_FRAMES``) to avoid sub-nanosecond noise.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ from typing import Any
 
 import numpy as np
 from scipy.stats import pearsonr
+
+from src import config
 
 try:
     from deeptime.decomposition import TICA
@@ -52,7 +62,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 FRAME_SPACING_NS: float = 0.1       # 100 ps per saved frame
-DEFAULT_LAG_FRAMES: list[int] = [1, 2, 3, 5, 8, 10, 15, 20]
+DEFAULT_LAG_FRAMES: list[int] = list(config.TICA_LAGTIME_FRAMES_SCAN)
 DEFAULT_DIM: int = 5
 DEFAULT_EPSILON: float = 1e-6
 DEFAULT_SCALING: str = "kinetic_map"
@@ -67,12 +77,64 @@ R_THRESHOLD_WEAK: float = 0.70
 # ---------------------------------------------------------------------------
 
 
+def choose_lag_from_implied_timescale_scan(
+    lag_frames: list[int],
+    t1_implied: list[float],
+    min_lag_frames: int,
+    rel_plateau: float,
+) -> tuple[int, str]:
+    """Pick production lag from TIC-1 implied timescales (MSM-style), not cross-lag VAMP-2.
+
+    Deeptime: VAMP/TICA scores at different τ are **not** on the same scale and must
+    not be ranked against each other across lags.  Here we use consecutive ITS steps
+    |Δt₁|/t₁ as a plateau heuristic (cf. implied timescale plots in MSM tutorials).
+
+    Returns
+    -------
+    (chosen_lag_frames, reason)
+    """
+    n = len(lag_frames)
+    for k in range(n - 1):
+        L0 = lag_frames[k]
+        if L0 < min_lag_frames:
+            continue
+        t0, t1v = t1_implied[k], t1_implied[k + 1]
+        if not (np.isfinite(t0) and np.isfinite(t1v) and t0 > 0):
+            continue
+        rel = abs(t1v - t0) / t0
+        if rel <= rel_plateau:
+            return L0, f"its_plateau(rel_step={rel:.3f}<={rel_plateau})"
+
+    best_k: int | None = None
+    best_rel = np.inf
+    for k in range(n - 1):
+        L0 = lag_frames[k]
+        if L0 < min_lag_frames:
+            continue
+        t0, t1v = t1_implied[k], t1_implied[k + 1]
+        if not (np.isfinite(t0) and np.isfinite(t1v) and t0 > 0):
+            continue
+        rel = abs(t1v - t0) / t0
+        if rel < best_rel:
+            best_rel = rel
+            best_k = k
+    if best_k is not None:
+        return lag_frames[best_k], f"its_min_rel_step({best_rel:.3f})"
+
+    for L in reversed(lag_frames):
+        if L >= min_lag_frames:
+            return L, "fallback_max_eligible_lag"
+    return int(lag_frames[-1]), "fallback_end_of_scan"
+
+
 def lag_scan(
     features: np.ndarray,
     lag_frames: list[int] | None = None,
     frame_spacing_ns: float = FRAME_SPACING_NS,
+    min_lag_frames: int | None = None,
+    rel_plateau: float | None = None,
 ) -> dict[str, Any]:
-    """Scan TICA lag times and compute implied timescales + VAMP-2 scores.
+    """Scan TICA lag times: implied timescale of TIC-1 + VAMP-2 (diagnostic only).
 
     Parameters
     ----------
@@ -80,24 +142,34 @@ def lag_scan(
         2D array of shape (n_frames, 40) — sin/cos backbone features,
         burn-in already removed.
     lag_frames:
-        Lag times to scan in frames.  Defaults to
-        [1, 2, 3, 5, 8, 10, 15, 20] matching the protocol.
+        Lag times to scan in frames.  Defaults to ``config.TICA_LAGTIME_FRAMES_SCAN``.
     frame_spacing_ns:
         Time between consecutive saved frames in nanoseconds (0.1 ns).
+    min_lag_frames:
+        Minimum lag (frames) for the **chosen** production lag.  Default:
+        ``config.TICA_MIN_LAG_FRAMES``.
+    rel_plateau:
+        Relative ITS step threshold for plateau detection.  Default:
+        ``config.TICA_LAG_ITS_REL_PLATEAU``.
 
     Returns
     -------
     dict with keys:
-        lags_ns           : list[float]   — lag times in nanoseconds
-        lags_frames       : list[int]     — lag times in frames
-        t1_implied        : list[float]   — TIC-1 implied timescale (ns) per lag
-        vamp2_scores      : list[float]   — VAMP-2 score per lag
-        recommended_lag_frames : int      — lag that maximises VAMP-2 score
-        recommended_lag_ns     : float
-        singular_values_per_lag: list[np.ndarray] — top-5 singular values per lag
+        lags_ns, lags_frames, t1_implied, vamp2_scores,
+        recommended_lag_frames, recommended_lag_ns,
+        lag_selection_reason, singular_values_per_lag
+
+    Notes
+    -----
+    ``vamp2_scores`` are logged for inspection only; deeptime explicitly states
+    VAMP scores cannot be compared across different lag times for ranking.
     """
     if lag_frames is None:
         lag_frames = DEFAULT_LAG_FRAMES
+    if min_lag_frames is None:
+        min_lag_frames = int(config.TICA_MIN_LAG_FRAMES)
+    if rel_plateau is None:
+        rel_plateau = float(config.TICA_LAG_ITS_REL_PLATEAU)
 
     lags_ns: list[float] = []
     t1_implied: list[float] = []
@@ -109,48 +181,40 @@ def lag_scan(
         tica = TICA(lagtime=lag, dim=DEFAULT_DIM, epsilon=DEFAULT_EPSILON,
                     scaling=DEFAULT_SCALING)
         model = tica.fit(features).fetch_model()
-        sv = model.singular_values  # shape (dim,)
+        sv = np.asarray(model.singular_values)
+        lam1 = float(abs(sv[0]))
 
         # TIC-1 implied timescale: t₁ = −τ / ln|λ₁|
-        lam1 = float(abs(sv[0]))
         if lam1 >= 1.0:
-            # Singular value ≥ 1 would give non-physical (infinite/negative) timescale;
-            # clamp it to a large sentinel so the scan still completes.
             t1 = np.inf
             logger.warning(
-                "Lag %d frames: λ₁ = %.4f ≥ 1 (numerical artefact); "
+                "Lag %d frames: lambda_1 = %.4f >= 1 (numerical artefact); "
                 "implied timescale set to inf.", lag, lam1
             )
         else:
             t1 = -lag_ns / np.log(lam1)
 
-        # VAMP-2 score: sum of squared singular values (variational bound on slow
-        # eigenvalues).  deeptime TICA.score() evaluates on the training data here;
-        # cross-validation would require a held-out set.
-        vamp2 = float(tica.score(features, r=2))
+        vamp2 = float(model.score(2))
 
         lags_ns.append(lag_ns)
         t1_implied.append(float(t1))
         vamp2_scores.append(vamp2)
-        sv_per_lag.append(sv.copy())
+        sv_per_lag.append(sv[:DEFAULT_DIM].copy())
 
         logger.info(
-            "Lag %2d fr (%4.1f ns): λ₁=%.4f  t₁=%.2f ns  VAMP-2=%.4f",
+            "Lag %2d fr (%4.1f ns): lambda_1=%.4f  t_impl_1=%.2f ns  "
+            "VAMP-2=%.4f (diag-only; not rankable across lags)",
             lag, lag_ns, lam1, t1, vamp2,
         )
 
-    # Recommended lag: the one with highest finite VAMP-2 score.
-    finite_idx = [i for i, t in enumerate(t1_implied) if np.isfinite(t)]
-    if finite_idx:
-        best_i = max(finite_idx, key=lambda i: vamp2_scores[i])
-    else:
-        best_i = int(np.argmax(vamp2_scores))
-
-    recommended_lag_frames = lag_frames[best_i]
-    recommended_lag_ns = lags_ns[best_i]
+    rec_lag, reason = choose_lag_from_implied_timescale_scan(
+        list(lag_frames), t1_implied, min_lag_frames, rel_plateau
+    )
+    rec_i = lag_frames.index(rec_lag)
+    recommended_lag_ns = lags_ns[rec_i]
     logger.info(
-        "Recommended lag (max VAMP-2): %d frames (%.1f ns)",
-        recommended_lag_frames, recommended_lag_ns,
+        "Chosen lag (ITS heuristic, min_lag=%d): %d frames (%.1f ns) -- %s",
+        min_lag_frames, rec_lag, recommended_lag_ns, reason,
     )
 
     return {
@@ -158,8 +222,9 @@ def lag_scan(
         "lags_frames": list(lag_frames),
         "t1_implied": t1_implied,
         "vamp2_scores": vamp2_scores,
-        "recommended_lag_frames": recommended_lag_frames,
+        "recommended_lag_frames": rec_lag,
         "recommended_lag_ns": recommended_lag_ns,
+        "lag_selection_reason": reason,
         "singular_values_per_lag": sv_per_lag,
     }
 
@@ -167,17 +232,16 @@ def lag_scan(
 def block_bootstrap_tic1_stability(
     features: np.ndarray,
     lagtime: int,
-    block_size: int = 20,
+    block_size: int | None = None,
     n_bootstrap: int = 100,
     threshold: float = 0.95,
     rng_seed: int = 42,
 ) -> dict[str, Any]:
     """Verify TIC-1 eigenvector stability via block bootstrap.
 
-    Block size = 20 frames × 100 ps/frame = 2 ns per block (≈ τ_eq/3 at 330 K).
-    Smaller than τ_eq means blocks are correlated — bootstrap is conservative.
-    For stricter independence use block_size ≥ 60 frames (≈ 6 ns). Protocol text
-    that says "10 ns blocks" assumed 500 ps spacing and should be updated there.
+    Default ``block_size`` is ``config.TICA_BOOTSTRAP_BLOCK_SIZE`` (50 frames =
+    5 ns at 100 ps), comparable to τ_eq so resampled blocks are nearer to
+    statistically independent (protocol §9.2).
 
     Uses scaling=None for geometric comparison of unit eigenvectors (kinetic_map
     scaling is only for the final projection).
@@ -206,6 +270,9 @@ def block_bootstrap_tic1_stability(
         stable        : bool  — True iff ALL resamples exceed threshold
         cosine_sims   : np.ndarray — raw cosine similarities (n_bootstrap,)
     """
+    if block_size is None:
+        block_size = int(config.TICA_BOOTSTRAP_BLOCK_SIZE)
+
     rng = np.random.default_rng(rng_seed)
     T = len(features)
     n_blocks_total = T // block_size
@@ -295,11 +362,63 @@ def train_tica(
         "Trained TICA: lagtime=%d frames, dim=%d, scaling=%s",
         lagtime, dim, scaling,
     )
+    sv_head = np.asarray(model.singular_values)[:dim]
     logger.info(
-        "Singular values: %s",
-        np.array2string(model.singular_values, precision=4, suppress_small=True),
+        "Singular values (first %d): %s",
+        dim,
+        np.array2string(sv_head, precision=4, suppress_small=True),
     )
     return model
+
+
+def verify_ic_projection_matches_manual_dot(
+    model,
+    features: np.ndarray,
+    ic: int = 0,
+) -> dict[str, float]:
+    """Sanity check: ``transform`` agrees with (X − μ)·v for IC ``ic``.
+
+    For deeptime TICA with ``kinetic_map``, the first left singular direction
+    still yields correlation ±1 with ``transform[:, ic]`` (empirically verified).
+    """
+    mean = np.asarray(model.mean_0)
+    V = np.asarray(model.singular_vectors_left)[:, ic]
+    y_manual = (features - mean) @ V
+    y_t = model.transform(features)[:, ic]
+    r, _ = pearsonr(y_t, y_manual)
+    return {
+        "pearson_transform_vs_manual_dot": float(r),
+        "median_abs_residual": float(np.median(np.abs(y_t - y_manual))),
+    }
+
+
+def cross_replica_tic1_cosine_similarity(
+    features: np.ndarray,
+    lagtime: int,
+    n_first_replica_frames: int,
+    dim: int = DEFAULT_DIM,
+    epsilon: float = DEFAULT_EPSILON,
+) -> float:
+    """|cos θ| between TIC-1 directions fit independently on two trajectory halves."""
+    if n_first_replica_frames <= 0 or n_first_replica_frames >= len(features):
+        return float("nan")
+    a = features[:n_first_replica_frames]
+    b = features[n_first_replica_frames:]
+    if len(a) < 2 * int(config.TICA_BOOTSTRAP_BLOCK_SIZE):
+        return float("nan")
+    m_a = (
+        TICA(lagtime=lagtime, dim=dim, epsilon=epsilon, scaling=None)
+        .fit(a)
+        .fetch_model()
+    )
+    m_b = (
+        TICA(lagtime=lagtime, dim=dim, epsilon=epsilon, scaling=None)
+        .fit(b)
+        .fetch_model()
+    )
+    va = np.asarray(m_a.singular_vectors_left)[:, 0]
+    vb = np.asarray(m_b.singular_vectors_left)[:, 0]
+    return float(abs(np.dot(va, vb)))
 
 
 def validate_tic1(
@@ -355,7 +474,7 @@ def validate_tic1(
         )
 
     logger.info(
-        "Pearson r(TIC-1, N_HB) = %.4f (p = %.2e) → status: %s",
+        "Pearson r(TIC-1, N_HB) = %.4f (p = %.2e) -> status: %s",
         r, pval, status,
     )
 
@@ -448,9 +567,11 @@ def save_tica_artifacts(
 
     paths: dict[str, Path] = {}
 
-    sv_left = model.singular_vectors_left   # (40, dim)
-    mean0 = model.mean_0                    # (40,)
-    sv = model.singular_values              # (dim,)
+    # deeptime ≥0.4 may expose full spectral data; persist only the fitted rank.
+    d = int(getattr(model, "output_dimension", model.singular_values.shape[0]))
+    sv_left = np.asarray(model.singular_vectors_left)[:, :d]
+    mean0 = np.asarray(model.mean_0)
+    sv = np.asarray(model.singular_values)[:d]
     lagtime = int(model.lagtime)
 
     artifacts = {
@@ -501,7 +622,7 @@ def _save_lag_scan_figure(
                label=f"chosen lag = {rec_lag_ns:.1f} ns")
     ax.set_xlabel("Lag time (ns)")
     ax.set_ylabel("TIC-1 implied timescale (ns)")
-    ax.set_title(f"{prefix.upper()} — Implied timescale scan")
+    ax.set_title(f"{prefix.upper()} - Implied timescale scan")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
@@ -511,7 +632,9 @@ def _save_lag_scan_figure(
                label=f"chosen lag = {rec_lag_ns:.1f} ns")
     ax.set_xlabel("Lag time (ns)")
     ax.set_ylabel("VAMP-2 score")
-    ax.set_title(f"{prefix.upper()} — VAMP-2 score vs lag")
+    ax.set_title(
+        f"{prefix.upper()} - VAMP-2 per lag (not rankable across lags)"
+    )
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
@@ -546,7 +669,7 @@ def _save_validation_figures(
     ax.set_ylabel("N$_{HB}$")
     ax.set_title(
         f"{prefix.upper()} TIC-1 vs N_HB\n"
-        f"|r| = {abs(r):.3f}   t₁ = {t_impl:.2f} ns"
+        f"|r| = {abs(r):.3f}   t_impl = {t_impl:.2f} ns"
     )
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -595,18 +718,22 @@ def run_tica_pipeline(
     output_dir: str | Path,
     lag_scan_frames: list[int] | None = None,
     frame_spacing_ns: float = FRAME_SPACING_NS,
+    min_lag_frames: int | None = None,
+    rel_plateau: float | None = None,
+    bootstrap_block_size: int | None = None,
+    n_frames_per_replica: int | None = None,
 ) -> dict[str, Any]:
     """Full TICA training pipeline for A10.
 
     Steps
     -----
-    1. Lag scan — implied timescale + VAMP-2 over candidate lags.
-    2. Choose lag — lag with maximum VAMP-2 score.
-    3. Block bootstrap — verify TIC-1 eigenvector stability.
+    1. Lag scan — TIC-1 implied timescale vs lag; VAMP-2 logged (not used to rank τ).
+    2. Choose lag — ITS plateau heuristic with minimum lag (``config.TICA_MIN_LAG_FRAMES``).
+    3. Block bootstrap — TIC-1 eigenvector stability (block size from config by default).
     4. Train production TICA — kinetic_map scaling, chosen lag.
     5. Validate TIC-1 — Pearson r(TIC-1, N_HB), FES, implied timescale.
-    6. Save artefacts — .npy files + .txt lagtime.
-    7. Save figures — lag scan, TIC-1 vs N_HB, FES.
+    6. Numerical checks — transform vs manual dot; optional two-replica TIC-1 cosine.
+    7. Save artefacts and figures.
 
     Parameters
     ----------
@@ -617,21 +744,22 @@ def run_tica_pipeline(
     output_dir:
         Directory for saved artefacts and figures.
     lag_scan_frames:
-        Lag frames to scan.  Defaults to DEFAULT_LAG_FRAMES.
+        Lag frames to scan.  Defaults to ``config.TICA_LAGTIME_FRAMES_SCAN``.
     frame_spacing_ns:
         Frame spacing in nanoseconds.
+    min_lag_frames, rel_plateau:
+        Forwarded to :func:`lag_scan`; ``None`` → ``config`` defaults.
+    bootstrap_block_size:
+        Block size for bootstrap; ``None`` → ``config.TICA_BOOTSTRAP_BLOCK_SIZE``.
+    n_frames_per_replica:
+        If ``len(features) == 2 * n_frames_per_replica``, compute |cos| between
+        TIC-1 eigenvectors fit on each replica alone (convergence diagnostic).
 
     Returns
     -------
     dict with keys:
-        scan_results    : dict from lag_scan()
-        bootstrap       : dict from block_bootstrap_tic1_stability()
-        model           : deeptime CovarianceKoopmanModel (production, kinetic_map)
-        validation      : dict from validate_tic1()
-        artifact_paths  : dict from save_tica_artifacts()
-        figure_paths    : list[Path]
-        chosen_lag_frames : int
-        chosen_lag_ns     : float
+        scan_results, bootstrap, model, validation, artifact_paths, figure_paths,
+        chosen_lag_frames, chosen_lag_ns, projection_check, replica_tic1_cosine
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -647,17 +775,24 @@ def run_tica_pipeline(
         features_a10,
         lag_frames=lag_scan_frames,
         frame_spacing_ns=frame_spacing_ns,
+        min_lag_frames=min_lag_frames,
+        rel_plateau=rel_plateau,
     )
     chosen_lag_frames: int = scan_results["recommended_lag_frames"]
     chosen_lag_ns: float = scan_results["recommended_lag_ns"]
     logger.info(
-        "Chosen lag: %d frames (%.1f ns)", chosen_lag_frames, chosen_lag_ns
+        "Chosen lag: %d frames (%.1f ns) [%s]",
+        chosen_lag_frames,
+        chosen_lag_ns,
+        scan_results.get("lag_selection_reason", ""),
     )
 
     # ---- Step 2: Block bootstrap -----------------------------------------
     logger.info("=== Step 2: Block bootstrap TIC-1 stability ===")
     bootstrap = block_bootstrap_tic1_stability(
-        features_a10, lagtime=chosen_lag_frames
+        features_a10,
+        lagtime=chosen_lag_frames,
+        block_size=bootstrap_block_size,
     )
     if not bootstrap["stable"]:
         logger.warning(
@@ -682,6 +817,29 @@ def run_tica_pipeline(
         model, features_a10, nhb_a10, frame_spacing_ns=frame_spacing_ns
     )
 
+    projection_check = verify_ic_projection_matches_manual_dot(
+        model, features_a10, ic=0
+    )
+    logger.info(
+        "Projection check TIC-1: r(transform, manual dot) = %.6f",
+        projection_check["pearson_transform_vs_manual_dot"],
+    )
+
+    replica_cos = float("nan")
+    if (
+        n_frames_per_replica is not None
+        and features_a10.shape[0] == 2 * int(n_frames_per_replica)
+    ):
+        replica_cos = cross_replica_tic1_cosine_similarity(
+            features_a10,
+            lagtime=chosen_lag_frames,
+            n_first_replica_frames=int(n_frames_per_replica),
+        )
+        logger.info(
+            "Two-replica TIC-1 |cos| (independent fits, scaling=None): %.4f",
+            replica_cos,
+        )
+
     # ---- Step 5: Save artefacts ------------------------------------------
     logger.info("=== Step 5: Save artefacts ===")
     artifact_paths = save_tica_artifacts(model, output_dir, prefix="a10")
@@ -698,10 +856,10 @@ def run_tica_pipeline(
     # ---- Summary ---------------------------------------------------------
     logger.info("=== Pipeline complete ===")
     logger.info("Chosen lag: %d frames (%.1f ns)", chosen_lag_frames, chosen_lag_ns)
-    logger.info("TIC-1 λ₁ = %.4f", float(model.singular_values[0]))
+    logger.info("TIC-1 lambda_1 = %.4f", float(model.singular_values[0]))
     logger.info("TIC-1 implied timescale: %.2f ns", validation["t_impl_ns"])
     logger.info(
-        "Pearson r(TIC-1, N_HB) = %.4f → %s",
+        "Pearson r(TIC-1, N_HB) = %.4f -> %s",
         validation["pearson_r"], validation["status"],
     )
     logger.info("FES two-well: %s", validation["fes_has_two_wells"])
@@ -717,6 +875,8 @@ def run_tica_pipeline(
         "figure_paths": figure_paths,
         "chosen_lag_frames": chosen_lag_frames,
         "chosen_lag_ns": chosen_lag_ns,
+        "projection_check": projection_check,
+        "replica_tic1_cosine": replica_cos,
     }
 
 
@@ -772,6 +932,40 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Time between consecutive saved frames in nanoseconds (default: {FRAME_SPACING_NS}).",
     )
     parser.add_argument(
+        "--min_lag_frames",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Minimum lag (frames) for production fit; default from "
+            "config.TICA_MIN_LAG_FRAMES."
+        ),
+    )
+    parser.add_argument(
+        "--rel_plateau",
+        type=float,
+        default=None,
+        metavar="X",
+        help="ITS plateau relative-step threshold; default config.TICA_LAG_ITS_REL_PLATEAU.",
+    )
+    parser.add_argument(
+        "--bootstrap_block_size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Bootstrap block size in frames; default config.TICA_BOOTSTRAP_BLOCK_SIZE.",
+    )
+    parser.add_argument(
+        "--n_frames_per_replica",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "If len(features)==2N, report |cos| between TIC-1 from each half "
+            "(independent fits).  E.g. 4750 for pooled 2×500 ns replicas."
+        ),
+    )
+    parser.add_argument(
         "--log_level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -817,23 +1011,40 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         lag_scan_frames=args.lag_frames,
         frame_spacing_ns=args.frame_spacing_ns,
+        min_lag_frames=args.min_lag_frames,
+        rel_plateau=args.rel_plateau,
+        bootstrap_block_size=args.bootstrap_block_size,
+        n_frames_per_replica=args.n_frames_per_replica,
     )
 
     # Final status summary to stdout
     v = results["validation"]
     b = results["bootstrap"]
+    scan = results["scan_results"]
+    pc = results["projection_check"]
     print("\n" + "=" * 60)
     print("TICA TRAINING SUMMARY")
     print("=" * 60)
+    print(f"Lag selection:       {scan.get('lag_selection_reason', '')}")
     print(f"Chosen lag:          {results['chosen_lag_frames']} frames  "
           f"({results['chosen_lag_ns']:.1f} ns)")
-    print(f"TIC-1 singular val:  {results['model'].singular_values[0]:.4f}")
+    sv0 = float(np.asarray(results["model"].singular_values).ravel()[0])
+    print(f"TIC-1 singular val:  {sv0:.4f}")
     print(f"TIC-1 t_impl:        {v['t_impl_ns']:.2f} ns")
-    print(f"Pearson r(TIC1,NHB): {v['pearson_r']:.4f}  "
-          f"(p={v['pearson_pval']:.2e})  → {v['status'].upper()}")
+    pr, pp = v["pearson_r"], v["pearson_pval"]
+    pr_s = f"{float(pr):.4f}" if np.isfinite(pr) else "nan"
+    pp_s = f"{float(pp):.2e}" if np.isfinite(pp) else "nan"
+    print(f"Pearson r(TIC1,NHB): {pr_s}  (p={pp_s})  -> {v['status'].upper()}")
     print(f"FES two-well:        {v['fes_has_two_wells']}")
     print(f"Bootstrap stable:    {b['stable']}  "
           f"(min |cos| = {b['min_cos_sim']:.3f})")
+    print(
+        f"Projection check:    r(manual dot) = "
+        f"{pc['pearson_transform_vs_manual_dot']:.6f}"
+    )
+    rc = results["replica_tic1_cosine"]
+    if np.isfinite(rc):
+        print(f"Replica |cos| TIC-1:  {rc:.4f}")
     print("Artefacts:")
     for name, path in results["artifact_paths"].items():
         print(f"  {path}")

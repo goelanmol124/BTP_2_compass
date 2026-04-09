@@ -75,11 +75,12 @@ Tikhonov regularisation for the TICA generalised eigenvalue problem.
 Prevents numerical issues when features are near-collinear.
 """
 
-TICA_LAG_SCAN_FRAMES: list[int] = [1, 2, 3, 5, 8, 10, 15, 20]
+TICA_LAG_SCAN_FRAMES: list[int] = [1, 2, 3, 5, 8, 10, 15, 20, 30, 40, 50]
 """
-Lag-time scan grid in trajectory frames (100 ps / frame).
-Corresponds to [0.5, 1.0, 1.5, 2.5, 4.0, 5.0, 7.5, 10.0] ns.
-The Markovian lag is typically 2–4 frames (1–2 ns) at 330 K.
+Lag-time scan grid in trajectory frames (100 ps / frame = 0.1 ns).
+Corresponds to [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0] ns.
+At 330 K a useful Markovian lag often falls near ~10–40 frames (~1–4 ns);
+the scan includes short lags for fast motions and long lags for implied-timescale plateaus.
 """
 
 FRAME_SPACING_NS: float = 0.1
