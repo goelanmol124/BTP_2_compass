@@ -4,6 +4,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+/outputs/
+
 # Large OpenMM output files
 *.xml
 *.dcd

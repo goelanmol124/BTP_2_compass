@@ -1124,3 +1124,190 @@ def _plot_helix_fraction_per_residue(
     fig.tight_layout()
     fig.savefig(output_path, dpi=_DPI)
     plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST-SEEDING: ground-truth split hists + adaptive_seeding_results.json → Phase 9
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def ground_truth_fes_histograms_split(
+    dcd_helix: str | Path,
+    top_helix: str | Path,
+    dcd_extended: str | Path,
+    top_extended: str | Path,
+    nbins: int = FES_NBINS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """2D histograms (sin φ₁ × cos φ₁) per replica — same grid as adaptive seeding GT.
+
+    Used with :func:`compute_noise_floor` for Phase 9 noise-floor JSON.
+    """
+    import mdtraj as md
+
+    from src.utils import featurize
+
+    hists: list[np.ndarray] = []
+    for dcd_path, top_pdb in (
+        (str(dcd_helix), str(top_helix)),
+        (str(dcd_extended), str(top_extended)),
+    ):
+        traj_full = md.load_dcd(dcd_path, top=top_pdb)
+        traj_prot = traj_full.atom_slice(traj_full.topology.select("protein"))
+        feats = featurize(traj_prot)
+        x = feats[:, 0]
+        y = feats[:, 10]
+        hist, _, _ = np.histogram2d(
+            x, y,
+            bins=nbins,
+            range=[[-1.05, 1.05], [-1.05, 1.05]],
+        )
+        hists.append(hist)
+    return hists[0], hists[1]
+
+
+def iteration_records_from_adaptive_seeding_json(
+    path: str | Path,
+    *,
+    seed_ns: float = 30.0,
+    n_seeds: int = 8,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load ``adaptive_seeding_results.json`` into plot-ready strategy lists.
+
+    Skips iterations with ``jsd is None`` (e.g. iteration 1 summaries).
+    ``cumulative_ns`` = iteration × n_seeds × seed_ns (protocol budget accounting).
+    """
+    path = Path(path)
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    key_map = {
+        "random": "Random",
+        "transferred": "Transferred TICA",
+        "native": "Native TICA",
+    }
+    out: dict[str, list[dict[str, Any]]] = {}
+    for raw_strat, iters_map in data.items():
+        disp = key_map.get(raw_strat)
+        if disp is None:
+            continue
+        rows: list[dict[str, Any]] = []
+        for it_key in sorted(iters_map.keys(), key=lambda x: int(x)):
+            summ = iters_map[it_key]
+            jsd = summ.get("jsd")
+            if jsd is None:
+                continue
+            itn = int(it_key)
+            cum = itn * n_seeds * seed_ns
+            cov = summ.get("coverage")
+            ent = summ.get("entropy")
+            fhe = summ.get("f_helix_error")
+            rows.append(
+                {
+                    "iteration": itn,
+                    "cumulative_ns": float(cum),
+                    "jsd": float(jsd),
+                    "coverage": float(cov) if cov is not None else 0.0,
+                    "entropy": float(ent) if ent is not None else 0.0,
+                    "f_helix_error": float(fhe) if fhe is not None else float("nan"),
+                }
+            )
+        if rows:
+            out[disp] = rows
+    return out
+
+
+def write_phase9_strategy_jsons(
+    adaptive_json: str | Path,
+    output_dir: str | Path,
+    *,
+    seed_ns: float = 30.0,
+    n_seeds: int = 8,
+) -> None:
+    """Write ``jsd_curves_{random,transferred,native}.json`` for :func:`generate_final_figures`."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    by_strat = iteration_records_from_adaptive_seeding_json(
+        adaptive_json, seed_ns=seed_ns, n_seeds=n_seeds,
+    )
+    fname_map = {
+        "Random": "jsd_curves_random.json",
+        "Transferred TICA": "jsd_curves_transferred.json",
+        "Native TICA": "jsd_curves_native.json",
+    }
+    for strat, fname in fname_map.items():
+        if strat not in by_strat:
+            continue
+        with open(output_dir / fname, "w", encoding="utf-8") as fh:
+            json.dump(by_strat[strat], fh, indent=2)
+
+
+def write_noise_floor_json(
+    hist_helix: np.ndarray,
+    hist_extended: np.ndarray,
+    output_path: str | Path,
+    min_count: int = FES_MIN_COUNT,
+) -> float:
+    """Write ``noise_floor.json`` and return the scalar noise floor."""
+    nf = compute_noise_floor(hist_helix, hist_extended, min_count=min_count)
+    output_path = Path(output_path)
+    payload = {
+        "noise_floor": float(nf),
+        "description": (
+            "JSD between helix-start and extended-start A8Q2 replicas "
+            "(masked domain from pooled counts)."
+        ),
+    }
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    return float(nf)
+
+
+def write_transferability_scores_from_transfer_summary(
+    transfer_summary_json: str | Path,
+    output_path: str | Path,
+) -> None:
+    """Map Phase 7 ``transfer_summary.json`` keys for :func:`generate_final_figures`."""
+    with open(transfer_summary_json, encoding="utf-8") as fh:
+        s = json.load(fh)
+    out = {
+        "d0": float(s.get("D0", s.get("d0", float("nan")))),
+        "d_tau": float(s.get("D_tau", s.get("d_tau", float("nan")))),
+        "d_km": float(s.get("D_KM", s.get("d_km", float("nan")))),
+        "pearson_r": float(s.get("pearson_r", float("nan"))),
+    }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2)
+
+
+def run_phase9_bundle_for_seeding_run(
+    *,
+    adaptive_results_json: Path,
+    sim_dir: Path,
+    prefix: str,
+    transfer_summary_json: Path | None,
+    bundle_dir: Path,
+    seed_ns: float = 30.0,
+    n_seeds: int = 8,
+) -> None:
+    """Assemble JSON inputs and call :func:`generate_final_figures` into ``bundle_dir/figures``."""
+    bundle_dir = Path(bundle_dir)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    dcd_h = sim_dir / f"{prefix}_helix_prod.dcd"
+    top_h = sim_dir / f"{prefix}_helix_prod_top.pdb"
+    dcd_e = sim_dir / f"{prefix}_extended_prod.dcd"
+    top_e = sim_dir / f"{prefix}_extended_prod_top.pdb"
+    h_h, h_e = ground_truth_fes_histograms_split(dcd_h, top_h, dcd_e, top_e)
+    write_noise_floor_json(h_h, h_e, bundle_dir / "noise_floor.json")
+    write_phase9_strategy_jsons(
+        adaptive_results_json,
+        bundle_dir,
+        seed_ns=seed_ns,
+        n_seeds=n_seeds,
+    )
+    if transfer_summary_json is not None and transfer_summary_json.is_file():
+        write_transferability_scores_from_transfer_summary(
+            transfer_summary_json,
+            bundle_dir / "transferability_scores.json",
+        )
+    generate_final_figures(bundle_dir, bundle_dir / "figures")

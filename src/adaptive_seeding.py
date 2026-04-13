@@ -33,6 +33,7 @@ References
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -46,6 +47,11 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Import simulation parameters from the single source of truth
 # ---------------------------------------------------------------------------
+from src.analysis import (
+    histogram_rmsd_nhb_fixed_edges,
+    pooled_ground_truth_fes_rmsd_nhb,
+)
+
 from src.config import (
     TEMPERATURE_K,
     TIMESTEP_FS,
@@ -60,6 +66,13 @@ from src.config import (
     TICA_SCALING,
     TICA_BOOTSTRAP_BLOCK_SIZE,
     TICA_N_BOOTSTRAP,
+    SEED_NS as CONFIG_SEED_NS,
+    N_SEEDS as CONFIG_N_SEEDS,
+    N_ITERATIONS as CONFIG_N_ITERATIONS,
+    N_CV_BINS,
+    FES_MIN_COUNT,
+    N_HB_MAX,
+    NHB_THRESHOLD_FRAC,
 )
 
 # ---------------------------------------------------------------------------
@@ -74,25 +87,27 @@ except ImportError:
 
 try:
     from src.metrics import (  # type: ignore
-        compute_jsd,
         compute_coverage,
         compute_entropy,
+        compute_f_helix_error,
+        compute_jsd,
     )
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
+    compute_f_helix_error = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Module-level constants derived from config
 # ---------------------------------------------------------------------------
-SEED_NS: float = 30.0
-"""Duration of each seed run: 30 ns = 1.5 × 10⁶ steps at 2 fs."""
+SEED_NS: float = float(CONFIG_SEED_NS)
+"""Duration of each seed run in ns (from src.config)."""
 
-N_SEEDS: int = 8
-"""Seeds per iteration. Balances exploration and convergence (HTMD §13)."""
+N_SEEDS: int = int(CONFIG_N_SEEDS)
+"""Seeds per iteration (from src.config)."""
 
-N_ITERATIONS: int = 5
-"""Total adaptive seeding iterations per strategy."""
+N_ITERATIONS: int = int(CONFIG_N_ITERATIONS)
+"""Total adaptive seeding iterations per strategy (from src.config)."""
 
 SEED_STEPS: int = int(SEED_NS * 1_000_000 / TIMESTEP_FS)
 """1_500_000 steps (30 ns at 2 fs/step)."""
@@ -103,8 +118,8 @@ DCD_STEPS: int = int(DCD_INTERVAL_PS * (1_000 / TIMESTEP_FS))
 CHK_STEPS: int = int(CHK_INTERVAL_PS * (1_000 / TIMESTEP_FS))
 """Checkpoint every 5000 ps → at most 5 ns lost on crash."""
 
-N_BINS: int = 10
-"""Number of equal-width bins for metastable least-counts discretisation."""
+N_BINS: int = int(N_CV_BINS)
+"""Equal-width CV bins for metastable least-counts (from ``src.config.N_CV_BINS``)."""
 
 TICA_COSINE_SIM_THRESHOLD: float = 0.90
 """Block bootstrap cosine similarity threshold for native TICA validation."""
@@ -368,11 +383,14 @@ def project_cv(
 # =============================================================================
 
 
-def _featurize_trajectory(traj_dcd: str, top_pdb: str) -> tuple[np.ndarray, np.ndarray]:
-    """Load a DCD trajectory and compute 40-D sin/cos torsion features.
+def _featurize_trajectory(
+    traj_dcd: str,
+    top_pdb: str,
+    helix_ref_pdb: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load a DCD and compute features, N_HB, and backbone RMSD vs ideal helix.
 
-    Also computes per-frame N_HB via ``analysis.compute_nhb`` (i→i+4 backbone
-    bonds, same definition as Phase 5 / production analysis).
+    Uses the same atom selection and observables as Phase 5 / ``src.analysis``.
 
     Parameters
     ----------
@@ -380,27 +398,37 @@ def _featurize_trajectory(traj_dcd: str, top_pdb: str) -> tuple[np.ndarray, np.n
         Path to DCD trajectory (full system: protein + water + ions).
     top_pdb : str
         Path to topology PDB written immediately before the DCDReporter.
-        Must have the same atom count and ordering as the DCD.
+    helix_ref_pdb : str
+        Ideal helix PDB for :func:`src.analysis.compute_backbone_rmsd_to_ideal_helix`.
 
     Returns
     -------
     features : np.ndarray
         Shape (n_frames, 40), sin/cos backbone torsion features.
     nhb : np.ndarray
-        Shape (n_frames,), i→i+4 backbone H-bond counts (float for downstream use).
+        Shape (n_frames,), i→i+4 backbone H-bond counts.
+    rmsd : np.ndarray
+        Shape (n_frames,), BB RMSD to ideal helix (nm).
     """
-    from src.analysis import compute_featurization, compute_nhb, load_trajectory
+    from src.analysis import (
+        compute_backbone_rmsd_to_ideal_helix,
+        compute_featurization,
+        compute_nhb,
+        load_trajectory,
+    )
 
     traj_prot = load_trajectory(traj_dcd, top_pdb, protein_only=True)
     features = compute_featurization(traj_prot)
     nhb = compute_nhb(traj_prot).astype(np.float64)
-    return features, nhb
+    rmsd = compute_backbone_rmsd_to_ideal_helix(traj_prot, helix_ref_pdb)
+    return features, nhb, rmsd
 
 
 def _pool_trajectories(
     dcd_paths: list[str],
     top_pdb: str,
-) -> tuple[np.ndarray, np.ndarray]:
+    helix_ref_pdb: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[str, int]]]:
     """Featurize and concatenate multiple DCD trajectories.
 
     Parameters
@@ -410,6 +438,8 @@ def _pool_trajectories(
         iterations). Non-existent paths are silently skipped with a warning.
     top_pdb : str
         Common topology PDB (same topology for all trajectories in the pool).
+    helix_ref_pdb : str
+        Ideal helix PDB for RMSD (same as ground-truth FES definition).
 
     Returns
     -------
@@ -417,18 +447,27 @@ def _pool_trajectories(
         Shape (n_total_frames, 40).
     nhb_pool : np.ndarray
         Shape (n_total_frames,).
+    rmsd_pool : np.ndarray
+        Shape (n_total_frames,), RMSD vs ideal helix (nm).
+    segments : list[tuple[str, int]]
+        ``(dcd_path, n_frames)`` for each successfully loaded file, in order.
+        Maps pooled row indices to the correct DCD for :func:`run_seed`.
     """
     all_features: list[np.ndarray] = []
     all_nhb: list[np.ndarray] = []
+    all_rmsd: list[np.ndarray] = []
+    segments: list[tuple[str, int]] = []
 
     for dcd in dcd_paths:
         if not os.path.exists(dcd):
             log.warning("Pooling: DCD not found, skipping: %s", dcd)
             continue
         try:
-            feats, nhb = _featurize_trajectory(dcd, top_pdb)
+            feats, nhb, rmsd = _featurize_trajectory(dcd, top_pdb, helix_ref_pdb)
+            segments.append((dcd, int(feats.shape[0])))
             all_features.append(feats)
             all_nhb.append(nhb)
+            all_rmsd.append(rmsd)
         except Exception as exc:
             log.warning("Pooling: failed to load %s (%s), skipping.", dcd, exc)
 
@@ -437,7 +476,28 @@ def _pool_trajectories(
             "No valid trajectories found in pool. Cannot proceed with seed selection."
         )
 
-    return np.concatenate(all_features, axis=0), np.concatenate(all_nhb, axis=0)
+    return (
+        np.concatenate(all_features, axis=0),
+        np.concatenate(all_nhb, axis=0),
+        np.concatenate(all_rmsd, axis=0),
+        segments,
+    )
+
+
+def _pooled_frame_to_dcd_local(
+    segments: list[tuple[str, int]],
+    pooled_index: int,
+) -> tuple[str, int]:
+    """Map a concatenated-pool frame index to ``(dcd_path, index_within_dcd)``."""
+    off = 0
+    for path, n in segments:
+        if pooled_index < off + n:
+            return path, pooled_index - off
+        off += n
+    raise IndexError(
+        f"Pooled frame index {pooled_index} out of range for pool "
+        f"({len(segments)} segments, {off} total frames)."
+    )
 
 
 # =============================================================================
@@ -600,6 +660,7 @@ def run_seed(
     strategy: str,
     random_seed: int,
     platform,
+    seed_steps: int = SEED_STEPS,
 ) -> dict:
     """Run one 30 ns NVT seed from a frame selected from the pooled trajectory.
 
@@ -631,7 +692,9 @@ def run_seed(
         Path to the pooled trajectory DCD for this strategy/iteration (or the
         generator PDB path for iteration 1, signalled by seed_frame_index=-1).
     prod_top_pdb : str
-        Path to the topology PDB matching the production DCD atom ordering.
+        Path to ``*_extended_prod_top.pdb`` (matches ``system_xml``). Used for
+        iterations ≥ 2 (DCD frames). Iteration 1 ignores this for topology and
+        loads the generator PDB via ``simulate._npt_final_topology_positions_box``.
     system_xml : str
         Path to the serialised OpenMM System XML (no barostat — NVT production).
     output_prefix : str
@@ -679,8 +742,43 @@ def run_seed(
     )
     integrator.setRandomNumberSeed(random_seed)
 
-    pdb = app.PDBFile(prod_top_pdb)
-    sim = app.Simulation(pdb.topology, system, integrator, platform)
+    n_sys = int(system.getNumParticles())
+
+    # Iteration 1: never use app.PDBFile() on the NPT-final PDB — OpenMM merges
+    # duplicate atom names (e.g. two ALA H) so topology/positions diverge from
+    # the serialized System XML (same bug Phase 4 avoids via simulate._npt_final_*).
+    if seed_frame_index == -1:
+        from pathlib import Path as _Path
+
+        from src.simulate import _npt_final_topology_positions_box
+
+        top_omm, positions0, box_vecs = _npt_final_topology_positions_box(
+            _Path(traj_pool_dcd), n_sys
+        )
+        if box_vecs is None:
+            raise ValueError(
+                f"Generator PDB '{traj_pool_dcd}' has no periodic box vectors. "
+                "Re-run Phase 3 to regenerate the NPT final PDB with CRYST1 / unitcell."
+            )
+        sim = app.Simulation(top_omm, system, integrator, platform)
+    else:
+        # ``*_prod_top.pdb`` can hit the same duplicate-name merge as NPT-final PDBs
+        # when read through ``PDBFile`` (e.g. 2670 topology vs 2671 XML particles).
+        # MDTraj preserves one record per ATOM line — match Phase 4 / iteration 1.
+        pdb_top = app.PDBFile(prod_top_pdb)
+        n_pdbfile = pdb_top.topology.getNumAtoms()
+        if n_pdbfile == n_sys:
+            omm_top = pdb_top.topology
+        else:
+            traj_top = md.load_pdb(prod_top_pdb)
+            if traj_top.n_atoms != n_sys:
+                raise ValueError(
+                    f"prod_top_pdb {prod_top_pdb!r}: PDBFile topology has {n_pdbfile} "
+                    f"atoms, MDTraj loaded {traj_top.n_atoms}, system XML has {n_sys}. "
+                    "Regenerate topology from production or check PDB/XML pairing."
+                )
+            omm_top = traj_top.topology.to_openmm()
+        sim = app.Simulation(omm_top, system, integrator, platform)
 
     # --- Checkpoint/resume ---
     steps_done = 0
@@ -688,7 +786,7 @@ def run_seed(
     if resume:
         sim.loadCheckpoint(seed_chk)
         steps_done = sim.currentStep
-        steps_remaining = SEED_STEPS - steps_done
+        steps_remaining = seed_steps - steps_done
         if steps_remaining <= 0:
             log.info(
                 "Seed iter%02d/%s/%02d already complete (%d steps). Skipping.",
@@ -707,27 +805,41 @@ def run_seed(
             iteration, strategy, seed_id, steps_done, steps_remaining,
         )
     else:
-        steps_remaining = SEED_STEPS
+        steps_remaining = seed_steps
 
         # --- Set state from selected frame (or generator PDB for iteration 1) ---
         if seed_frame_index == -1:
-            # Iteration 1: start from generator PDB (traj_pool_dcd is the generator path)
-            gen_pdb = app.PDBFile(traj_pool_dcd)
-            gen_box = gen_pdb.topology.getPeriodicBoxVectors()
-            if gen_box is None:
-                raise ValueError(
-                    f"Generator PDB '{traj_pool_dcd}' has no CRYST1 / periodic box record. "
-                    "Re-run Phase 3 to regenerate the NPT final PDB."
-                )
-            sim.context.setPeriodicBoxVectors(*gen_box)
-            sim.context.setPositions(gen_pdb.positions)
+            # positions0 / box_vecs already loaded above with MDTraj-safe topology
+            sim.context.setPeriodicBoxVectors(*box_vecs)
+            sim.context.setPositions(positions0)
         else:
-            # Iterations 2+: load pooled DCD and extract the selected frame
-            traj_full = md.load_dcd(traj_pool_dcd, top=prod_top_pdb)
-            frame = traj_full[seed_frame_index]
-            seed_box_vectors = frame.openmm_boxes(0)
+            # Iterations 2+: load only the selected frame from the pooled DCD.
+            if not os.path.exists(traj_pool_dcd):
+                raise FileNotFoundError(f"Pooled DCD not found: {traj_pool_dcd}")
+            try:
+                frame = md.load_frame(traj_pool_dcd, int(seed_frame_index), top=prod_top_pdb)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load frame {seed_frame_index} from {traj_pool_dcd}: {exc}"
+                ) from exc
+
             seed_positions = frame.openmm_positions(0)
-            sim.context.setPeriodicBoxVectors(*seed_box_vectors)
+            # Some MDTraj/DCD combinations have no unitcell vectors (unitcell_vectors=None).
+            # In that case we use box vectors from the production topology if present,
+            # else keep the current context box vectors from the serialized System.
+            if getattr(frame, "unitcell_vectors", None) is not None:
+                seed_box_vectors = frame.openmm_boxes(0)
+                sim.context.setPeriodicBoxVectors(*seed_box_vectors)
+            else:
+                top_box = app.PDBFile(prod_top_pdb).topology.getPeriodicBoxVectors()
+                if top_box is not None:
+                    sim.context.setPeriodicBoxVectors(*top_box)
+                else:
+                    log.warning(
+                        "Frame %d from %s has no unitcell vectors and %s has no CRYST1 box; "
+                        "using existing context box vectors.",
+                        seed_frame_index, traj_pool_dcd, prod_top_pdb,
+                    )
             sim.context.setPositions(seed_positions)
 
         sim.context.applyConstraints(1e-7)
@@ -757,7 +869,7 @@ def run_seed(
             temperature=True,
             progress=True,
             remainingTime=True,
-            totalSteps=SEED_STEPS,
+            totalSteps=seed_steps,
             separator="\t",
             append=log_mode_append,
         )
@@ -800,6 +912,8 @@ def _run_iteration1_seeds(
     strategy: str,
     output_dir: Path,
     platform,
+    n_seeds: int = N_SEEDS,
+    seed_steps: int = SEED_STEPS,
 ) -> list[dict]:
     """Run 8 independent 30 ns seeds from the generator PDB.
 
@@ -831,8 +945,9 @@ def _run_iteration1_seeds(
     iter_dir = output_dir / "iter01" / strategy
     results = []
 
-    for seed_id in range(N_SEEDS):
-        prefix = f"A8Q2_{strategy}_iter01_seed{seed_id:02d}"
+    tag = _system_tag_from_prod_top(prod_top_pdb)
+    for seed_id in range(n_seeds):
+        prefix = f"{tag}_{strategy}_iter01_seed{seed_id:02d}"
         result_json = iter_dir / f"{prefix}_result.json"
 
         if result_json.exists():
@@ -857,6 +972,7 @@ def _run_iteration1_seeds(
             strategy=strategy,
             random_seed=random_seed,
             platform=platform,
+            seed_steps=seed_steps,
         )
 
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -878,7 +994,8 @@ def run_iteration(
     pool_dcds: list[str],
     prod_top_pdb: str,
     system_xml: str,
-    ground_truth_hist: np.ndarray,
+    ground_truth_fes: dict,
+    helix_ref_pdb: str,
     output_dir: Path,
     tica_model_a10=None,
     mean_donor: Optional[np.ndarray] = None,
@@ -886,6 +1003,8 @@ def run_iteration(
     native_tica_model=None,
     platform=None,
     rng_seed: Optional[int] = None,
+    n_seeds: int = N_SEEDS,
+    seed_steps: int = SEED_STEPS,
 ) -> dict:
     """Run one full adaptive seeding iteration.
 
@@ -894,7 +1013,7 @@ def run_iteration(
     2. Compute CV values and select N_SEEDS seed frames (strategy-dependent).
     3. Run N_SEEDS × 30 ns seed MD simulations.
     4. Pool new seed DCDs with prior pool, recompute features.
-    5. Compute 2D FES on the fixed reference grid.
+    5. Compute 2D FES (RMSD×N_HB) on the fixed reference grid (Phase 5).
     6. Compute JSD, coverage, entropy vs ground truth, and f_helix_error.
     7. For strategy 'native': attempt TICA retraining on expanded pool.
     8. Save iteration summary JSON.
@@ -913,9 +1032,12 @@ def run_iteration(
         Topology PDB for the full solvated A8Q2 system.
     system_xml : str
         Serialised NVT OpenMM System XML (no barostat).
-    ground_truth_hist : np.ndarray
-        2D histogram of the ground-truth A8Q2 FES (shape e.g. 25×25 bins).
-        Used for JSD, coverage, and entropy computation.
+    ground_truth_fes : dict
+        Output of :func:`src.analysis.pooled_ground_truth_fes_rmsd_nhb`: keys
+        ``hist``, ``edges_rmsd``, ``edges_nhb``, ``f_helix`` (reference 2D counts
+        and bin edges for JSD / coverage / entropy; helix fraction for error).
+    helix_ref_pdb : str
+        Ideal helix PDB path (RMSD definition; must match ground truth).
     output_dir : Path
         Root output directory; iteration output goes to
         ``output_dir/iter{iteration:02d}/{strategy}/``.
@@ -965,7 +1087,9 @@ def run_iteration(
 
     # --- Step 1: Pool prior trajectories ---
     log.info("Iteration %d/%s: pooling %d trajectories.", iteration, strategy, len(pool_dcds))
-    features_pool, nhb_pool = _pool_trajectories(pool_dcds, prod_top_pdb)
+    features_pool, nhb_pool, _rmsd_prior, pool_segments = _pool_trajectories(
+        pool_dcds, prod_top_pdb, helix_ref_pdb
+    )
 
     # --- Step 2: Compute CV and select seed frames ---
     cv_used: str = strategy  # default label; overridden for 'native'
@@ -974,7 +1098,7 @@ def run_iteration(
         cv_values = None
         seed_frame_indices = select_seeds_random(
             features_pool,
-            n_seeds=N_SEEDS,
+            n_seeds=n_seeds,
             rng_seed=rng_seed,
         )
     elif strategy == "transferred":
@@ -986,7 +1110,7 @@ def run_iteration(
         )
         seed_frame_indices = select_seeds_least_counts(
             cv_values,
-            n_seeds=N_SEEDS,
+            n_seeds=n_seeds,
             n_bins=N_BINS,
             rng_seed=rng_seed,
         )
@@ -1008,7 +1132,7 @@ def run_iteration(
         )
         seed_frame_indices = select_seeds_least_counts(
             cv_values,
-            n_seeds=N_SEEDS,
+            n_seeds=n_seeds,
             n_bins=N_BINS,
             rng_seed=rng_seed,
         )
@@ -1016,20 +1140,36 @@ def run_iteration(
     # --- Step 3: Run seeds ---
     log.info(
         "Iteration %d/%s (cv=%s): running %d seeds.",
-        iteration, strategy, cv_used, N_SEEDS,
+        iteration, strategy, cv_used, n_seeds,
     )
     seed_results: list[dict] = []
     new_dcds: list[str] = []
 
+    tag = _system_tag_from_prod_top(prod_top_pdb)
     for seed_id, frame_idx in enumerate(seed_frame_indices):
-        prefix = f"A8Q2_{strategy}_iter{iteration:02d}_seed{seed_id:02d}"
+        prefix = f"{tag}_{strategy}_iter{iteration:02d}_seed{seed_id:02d}"
         result_json = iter_dir / f"{prefix}_result.json"
 
         if result_json.exists():
-            with open(result_json) as fh:
-                result = json.load(fh)
-            log.info("Seed %d already done (loaded from JSON).", seed_id)
+            try:
+                with open(result_json) as fh:
+                    result = json.load(fh)
+                if not isinstance(result, dict) or "output_dcd" not in result:
+                    raise ValueError("missing output_dcd")
+                out_dcd = str(result["output_dcd"])
+                if not os.path.exists(out_dcd):
+                    raise ValueError(f"cached output_dcd does not exist: {out_dcd}")
+                log.info("Seed %d already done (loaded from JSON).", seed_id)
+            except Exception as exc:
+                log.warning(
+                    "Seed %d cache invalid (%s); re-running this seed.",
+                    seed_id, exc,
+                )
+                result = None
         else:
+            result = None
+
+        if result is None:
             # Derive a deterministic per-seed random seed
             per_seed_rng = (
                 (rng_seed if rng_seed is not None else 0) * 1_000
@@ -1037,9 +1177,12 @@ def run_iteration(
                 + seed_id
             ) % (2**31 - 1)
 
+            dcd_for_frame, local_frame = _pooled_frame_to_dcd_local(
+                pool_segments, int(frame_idx)
+            )
             result = run_seed(
-                seed_frame_index=int(frame_idx),
-                traj_pool_dcd=pool_dcds[-1],  # latest pooled DCD as source for frames
+                seed_frame_index=int(local_frame),
+                traj_pool_dcd=dcd_for_frame,
                 prod_top_pdb=prod_top_pdb,
                 system_xml=system_xml,
                 output_prefix=prefix,
@@ -1049,6 +1192,7 @@ def run_iteration(
                 strategy=strategy,
                 random_seed=per_seed_rng,
                 platform=platform,
+                seed_steps=seed_steps,
             )
             with open(result_json, "w") as fh:
                 json.dump(result, fh, indent=2)
@@ -1058,7 +1202,9 @@ def run_iteration(
 
     # --- Step 4: Pool updated data and compute FES ---
     all_dcds = pool_dcds + new_dcds
-    features_updated, nhb_updated = _pool_trajectories(all_dcds, prod_top_pdb)
+    features_updated, nhb_updated, rmsd_updated, _ = _pool_trajectories(
+        all_dcds, prod_top_pdb, helix_ref_pdb
+    )
 
     if strategy == "random":
         cv_updated = None
@@ -1077,10 +1223,11 @@ def run_iteration(
             nhb=nhb_updated,
         )
 
-    # --- Step 5: Compute 2D FES and metrics ---
+    # --- Step 5: Compute 2D FES and metrics (RMSD × N_HB, Phase 5) ---
     sampled_hist, jsd_val, cov_val, ent_val, f_helix_err = _compute_fes_metrics(
-        features_updated,
-        ground_truth_hist,
+        nhb_updated,
+        rmsd_updated,
+        ground_truth_fes,
     )
 
     # --- Step 6: Save iteration summary ---
@@ -1093,6 +1240,8 @@ def run_iteration(
         "coverage": float(cov_val),
         "entropy": float(ent_val),
         "f_helix_error": float(f_helix_err),
+        "f_helix_groundtruth": float(ground_truth_fes["f_helix"]),
+        "fes_definition": "rmsd_x_nhb",
         "n_frames_pool": int(len(features_updated)),
         "native_tica_model": None,  # not JSON-serialisable; tracked in memory
     }
@@ -1117,57 +1266,42 @@ def run_iteration(
 
 
 def _compute_fes_metrics(
-    features_pool: np.ndarray,
-    ground_truth_hist: np.ndarray,
-    phi_psi_bins: int = 25,
-    min_count: int = 3,
+    nhb_pool: np.ndarray,
+    rmsd_pool: np.ndarray,
+    ground_truth_fes: dict,
+    min_count: int = FES_MIN_COUNT,
 ) -> tuple[np.ndarray, float, float, float, float]:
-    """Compute 2D FES histogram and comparison metrics against ground truth.
-
-    The 2D FES uses RMSD (proxy: TIC-1) × N_HB space on a fixed 25×25 grid,
-    consistent with the ground-truth histogram from Phase 9. For simplicity,
-    we re-use the first two sin/cos torsion PCA components as the 2D axes
-    when the full analysis pipeline is not available.
+    """Compute RMSD×N_HB histogram and metrics vs Phase-5 ground truth.
 
     Parameters
     ----------
-    features_pool : np.ndarray
-        Shape (n_frames, 40). Pooled sin/cos torsion features.
-    ground_truth_hist : np.ndarray
-        Shape (n_bins_x, n_bins_y). Reference histogram from 500+500 ns A8Q2.
-    phi_psi_bins : int
-        Number of histogram bins per axis (default 25, matching §12.1).
+    nhb_pool, rmsd_pool : np.ndarray
+        Pooled per-frame observables (same definition as ``compute_2d_fes``).
+    ground_truth_fes : dict
+        Reference bundle from :func:`src.analysis.pooled_ground_truth_fes_rmsd_nhb`
+        with keys ``hist``, ``edges_rmsd``, ``edges_nhb``, ``f_helix``.
     min_count : int
-        Minimum ground-truth bin count for inclusion in masked comparisons.
+        Masked-domain threshold (``FES_MIN_COUNT``).
 
     Returns
     -------
     sampled_hist : np.ndarray
-        Shape matching ground_truth_hist. Raw count histogram of the sampled data.
-    jsd : float
-        Jensen–Shannon divergence (bits) between sampled and reference.
-    cov : float
-        Fraction of reference bins (≥ min_count) that have ≥ 1 sample hit.
-    entropy : float
-        Normalised distribution entropy of sampled histogram.
-    f_helix_error : float
-        |f_helix_seeded − f_helix_groundtruth|.
+        Raw counts on the **same** RMSD/N_HB bin edges as the reference.
+    jsd, cov, ent, f_helix_error
+        As in protocol §12 / ``src.metrics``.
     """
-    n_frames = len(features_pool)
-    nbins = ground_truth_hist.shape[0]
+    ground_truth_hist = np.asarray(ground_truth_fes["hist"], dtype=float)
+    edges_rmsd = np.asarray(ground_truth_fes["edges_rmsd"])
+    edges_nhb = np.asarray(ground_truth_fes["edges_nhb"])
+    f_helix_gt = float(ground_truth_fes["f_helix"])
 
-    # Project to 2D using first two sin(phi) columns as proxy axes.
-    # These capture the dominant variance in backbone conformation space.
-    x_vals = features_pool[:, 0]   # sin(phi_1)
-    y_vals = features_pool[:, 10]  # cos(phi_1)
-
-    sampled_hist, _, _ = np.histogram2d(
-        x_vals, y_vals,
-        bins=nbins,
-        range=[[-1.05, 1.05], [-1.05, 1.05]],
+    sampled_hist = histogram_rmsd_nhb_fixed_edges(
+        rmsd_pool,
+        nhb_pool,
+        edges_rmsd,
+        edges_nhb,
     )
 
-    # --- JSD / coverage / entropy (protocol §12 — masked domain vs ground truth) ---
     if _METRICS_AVAILABLE:
         jsd_val = float(compute_jsd(ground_truth_hist, sampled_hist, min_count=min_count))
         cov_val = float(
@@ -1181,20 +1315,14 @@ def _compute_fes_metrics(
         cov_val = _fallback_coverage(ground_truth_hist, sampled_hist, min_count=min_count)
         ent_val = _normalised_entropy(sampled_hist)
 
-    # --- f_helix_error ---
-    # Helix: residues with phi ∈ [−90°, −30°] AND psi ∈ [−70°, −10°]
-    # Approximation using sin/cos columns:
-    #   phi in helix range → sin(phi) in [−0.5, 0.5], cos(phi) in [0.5, 1.0]
-    phi_helix_mask = (features_pool[:, 0] > -0.5) & (features_pool[:, 0] < 0.5)
-    f_helix_seeded = float(phi_helix_mask.mean())
-
-    # Ground-truth f_helix from the histogram: fraction of frames in helix region
-    # Use normalised total count as proxy (0.05–0.15 for A8Q2 at 330 K)
-    gt_total = float(ground_truth_hist.sum())
-    gt_helix_region = float(ground_truth_hist[:nbins // 2, :nbins // 2].sum())
-    f_helix_gt = gt_helix_region / gt_total if gt_total > 0 else 0.12  # literature prior
-
-    f_helix_err = abs(f_helix_seeded - f_helix_gt)
+    if np.isfinite(f_helix_gt):
+        if _METRICS_AVAILABLE and compute_f_helix_error is not None:
+            f_helix_err = float(compute_f_helix_error(nhb_pool, f_helix_gt))
+        else:
+            thr = float(N_HB_MAX * NHB_THRESHOLD_FRAC)
+            f_helix_err = abs(float((nhb_pool >= thr).mean()) - f_helix_gt)
+    else:
+        f_helix_err = float("nan")
 
     return sampled_hist, jsd_val, cov_val, ent_val, f_helix_err
 
@@ -1252,6 +1380,17 @@ def _normalised_entropy(hist: np.ndarray) -> float:
 # =============================================================================
 
 
+def _prod_top_pdb_for_dcd(dcd_path: str) -> str:
+    """``A8Q2_helix_prod.dcd`` → ``A8Q2_helix_prod_top.pdb`` (same directory)."""
+    p = Path(dcd_path)
+    top = p.parent / f"{p.stem}_top.pdb"
+    if not top.is_file():
+        raise FileNotFoundError(
+            f"Expected MDTraj topology next to production DCD: {top} (for {dcd_path})"
+        )
+    return str(top)
+
+
 def run_adaptive_seeding(
     generator_pdb: str,
     system_xml: str,
@@ -1263,6 +1402,10 @@ def run_adaptive_seeding(
     n_iterations: int = 5,
     n_seeds: int = 8,
     seed_ns: float = 30.0,
+    ground_truth_top_helix: Optional[str] = None,
+    ground_truth_top_extended: Optional[str] = None,
+    helix_ref_pdb: Optional[str] = None,
+    skip_iter1_consistency_check: bool = False,
 ) -> dict:
     """Run the complete adaptive seeding experiment for all three strategies.
 
@@ -1280,8 +1423,15 @@ def run_adaptive_seeding(
     system_xml : str
         Path to serialised NVT OpenMM System XML for A8Q2 (no barostat).
     prod_top_pdb : str
-        Path to ``A8Q2_extended_prod_top.pdb`` — topology PDB matching the
-        production DCD. Written immediately before DCDReporter in Phase 4.
+        Path to ``A8Q2_extended_prod_top.pdb`` — topology for **seed** trajectories
+        (extended box). Written immediately before extended production DCDReporter.
+    ground_truth_top_helix, ground_truth_top_extended : str or None
+        MDTraj topologies for each ground-truth DCD. If ``None``, inferred as
+        ``{dcd_stem}_top.pdb`` beside each DCD (required when helix and extended
+        replicas have different atom counts).
+    helix_ref_pdb : str or None
+        Ideal helix PDB for RMSD (e.g. ``A8Q2_helix.pdb``). If ``None``, uses
+        ``{PREFIX}_helix.pdb`` in the same directory as ``prod_top_pdb``.
     ground_truth_dcd_helix : str
         Path to ``A8Q2_helix_prod.dcd`` (500 ns ground-truth helix replica).
     ground_truth_dcd_extended : str
@@ -1300,6 +1450,9 @@ def run_adaptive_seeding(
         Seeds per iteration (default 8; must match N_SEEDS).
     seed_ns : float
         Duration of each seed run in ns (default 30.0; must match SEED_NS).
+    skip_iter1_consistency_check : bool
+        If True, skip the mandatory cross-strategy iteration-1 initial-topology
+        SHA256 gate (not recommended).
 
     Returns
     -------
@@ -1313,6 +1466,8 @@ def run_adaptive_seeding(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Configure logging as early as possible so validation/runtime errors and
+    # CLI-level exception hooks write to adaptive_seeding.log as well as stdout.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1322,12 +1477,44 @@ def run_adaptive_seeding(
         ],
     )
 
+    if n_iterations < 1:
+        raise ValueError(f"n_iterations must be >= 1, got {n_iterations}")
+    if n_seeds < 1:
+        raise ValueError(f"n_seeds must be >= 1, got {n_seeds}")
+    if seed_ns <= 0:
+        raise ValueError(f"seed_ns must be > 0, got {seed_ns}")
+    seed_steps = int(seed_ns * 1_000_000 / TIMESTEP_FS)
+
+    gt_top_helix_pdb = ground_truth_top_helix or _prod_top_pdb_for_dcd(
+        ground_truth_dcd_helix
+    )
+    gt_top_extended_pdb = ground_truth_top_extended or _prod_top_pdb_for_dcd(
+        ground_truth_dcd_extended
+    )
+
     platform = get_best_platform()
 
-    # --- Load ground truth ---
-    log.info("Loading ground-truth trajectories for FES reference.")
-    gt_hist = _build_ground_truth_histogram(
-        ground_truth_dcd_helix, ground_truth_dcd_extended, prod_top_pdb
+    # --- Ground-truth RMSD×N_HB reference (Phase 5) ---
+    tag = _system_tag_from_prod_top(prod_top_pdb)
+    helix_ref_resolved = (
+        helix_ref_pdb
+        if helix_ref_pdb
+        else str(Path(prod_top_pdb).resolve().parent / f"{tag}_helix.pdb")
+    )
+    if not os.path.isfile(helix_ref_resolved):
+        log.warning(
+            "Ideal helix PDB not found at %s — FES metrics need it (place %s_helix.pdb "
+            "next to prod top or pass helix_ref_pdb).",
+            helix_ref_resolved,
+            tag,
+        )
+    log.info("Loading ground-truth trajectories for FES reference (RMSD×N_HB).")
+    gt_fes = pooled_ground_truth_fes_rmsd_nhb(
+        [
+            (ground_truth_dcd_helix, gt_top_helix_pdb),
+            (ground_truth_dcd_extended, gt_top_extended_pdb),
+        ],
+        helix_ref_resolved,
     )
 
     # --- Load A10 TICA artifacts for Strategy 2 ---
@@ -1382,8 +1569,19 @@ def run_adaptive_seeding(
             if strategy in cached:
                 log.info("Iteration 1/%s loaded from cache.", strategy)
                 iter1_results = cached[strategy]
-                results[strategy][1] = iter1_results
-                pool_dcds[strategy] = [r["output_dcd"] for r in iter1_results]
+                # iter01_results.json stores a list of per-seed dicts; results[.][1]
+                # must match the fresh-run shape (summary dict) for _serialise_results.
+                results[strategy][1] = {
+                    "iteration": 1,
+                    "strategy": strategy,
+                    "cv_used": "generator",
+                    "seed_paths": [r["output_dcd"] for r in iter1_results],
+                    "jsd": None,
+                    "coverage": None,
+                    "entropy": None,
+                    "f_helix_error": None,
+                }
+                pool_dcds[strategy] = results[strategy][1]["seed_paths"]
                 continue
 
         log.info("=== Running Iteration 1 / Strategy '%s' ===", strategy)
@@ -1394,6 +1592,8 @@ def run_adaptive_seeding(
             strategy=strategy,
             output_dir=output_dir,
             platform=platform,
+            n_seeds=n_seeds,
+            seed_steps=seed_steps,
         )
         iter1_summary = {
             "iteration": 1,
@@ -1411,6 +1611,44 @@ def run_adaptive_seeding(
         # Cache to disk
         _append_iter1_cache(output_dir / "iter01_results.json", strategy, iter1_seed_results)
 
+    # --- Mandatory iteration-1 cross-strategy gate (initial *_top.pdb) ---
+    if skip_iter1_consistency_check:
+        log.warning(
+            "Iteration-1 cross-strategy consistency check SKIPPED (--no-iter1-consistency-check). "
+            "Downstream metrics may not be comparable across strategies."
+        )
+        v_payload = {
+            "passed": None,
+            "skipped": True,
+            "reason": "user_disabled_skip_iter1_consistency_check",
+            "strategies": list(strategies),
+        }
+        _write_iter1_verification_json(output_dir, v_payload)
+    else:
+        v_payload = _verify_iter1_initial_tops_consistent(
+            output_dir=output_dir,
+            strategies=strategies,
+            n_seeds=n_seeds,
+            prod_top_pdb=prod_top_pdb,
+            generator_pdb=generator_pdb,
+        )
+        _write_iter1_verification_json(output_dir, v_payload)
+        if not v_payload.get("passed"):
+            bad = [
+                r["seed_id"]
+                for r in v_payload.get("per_seed", [])
+                if not r.get("ok", True)
+            ]
+            raise RuntimeError(
+                "Iteration-1 cross-strategy initial-topology verification FAILED "
+                f"(seed_ids with issues: {bad}). "
+                "All strategies must share identical Cartesian coordinates in "
+                "iter01/*/*_top.pdb for each seed before iteration 2. "
+                "Remove outputs/seeding_*/iter01*, iter01_results.json, and "
+                "adaptive_seeding_results.json, then re-run seeding in one session. "
+                f"Audit file: {output_dir / 'iter01_verification.json'}"
+            )
+
     # --- Iterations 2+ ---
     for iteration in range(2, n_iterations + 1):
         for strategy in strategies:
@@ -1424,7 +1662,8 @@ def run_adaptive_seeding(
                 pool_dcds=list(pool_dcds[strategy]),
                 prod_top_pdb=prod_top_pdb,
                 system_xml=system_xml,
-                ground_truth_hist=gt_hist,
+                ground_truth_fes=gt_fes,
+                helix_ref_pdb=helix_ref_resolved,
                 output_dir=output_dir,
                 tica_model_a10=None,
                 mean_donor=mean_donor,
@@ -1432,6 +1671,8 @@ def run_adaptive_seeding(
                 native_tica_model=native_tica_models.get("native"),
                 platform=platform,
                 rng_seed=rng_seed,
+                n_seeds=n_seeds,
+                seed_steps=seed_steps,
             )
 
             # Update the native TICA model in memory if it was retrained
@@ -1457,60 +1698,22 @@ def run_adaptive_seeding(
 def _build_ground_truth_histogram(
     dcd_helix: str,
     dcd_extended: str,
-    top_pdb: str,
+    top_helix_pdb: str,
+    top_extended_pdb: str,
+    helix_ref_pdb: str,
     nbins: int = 25,
 ) -> np.ndarray:
-    """Build the 2D reference FES histogram from the two ground-truth replicas.
+    """Return raw RMSD×N_HB ground-truth counts (Phase 5; shape ``nbins × (N_HB_MAX+1)``).
 
-    Pools both 500 ns replicas (helix-start and extended-start), projects to
-    the same 2D feature axes used in _compute_fes_metrics, and returns the raw
-    count histogram. Protocol §12.1: grid is fixed at 25×25 bins.
-
-    Parameters
-    ----------
-    dcd_helix : str
-        Path to A8Q2_helix_prod.dcd (500 ns ground-truth trajectory).
-    dcd_extended : str
-        Path to A8Q2_extended_prod.dcd (500 ns ground-truth trajectory).
-    top_pdb : str
-        Topology PDB for both trajectories.
-    nbins : int
-        Number of bins per axis (default 25).
-
-    Returns
-    -------
-    np.ndarray
-        Shape (nbins, nbins). Raw count histogram.
+    Thin wrapper around :func:`src.analysis.pooled_ground_truth_fes_rmsd_nhb` for
+    tests and smoke scripts that only need the histogram array.
     """
-    from src.utils import featurize
-    import mdtraj as md
-
-    all_x: list[np.ndarray] = []
-    all_y: list[np.ndarray] = []
-
-    for dcd_path in [dcd_helix, dcd_extended]:
-        if not os.path.exists(dcd_path):
-            log.warning("Ground-truth DCD not found: %s — using empty histogram.", dcd_path)
-            continue
-        traj_full = md.load_dcd(dcd_path, top=top_pdb)
-        traj_prot = traj_full.atom_slice(traj_full.topology.select("protein"))
-        feats = featurize(traj_prot)
-        all_x.append(feats[:, 0])   # sin(phi_1)
-        all_y.append(feats[:, 10])  # cos(phi_1)
-
-    if not all_x:
-        log.warning("No ground-truth trajectories found; returning zero histogram.")
-        return np.zeros((nbins, nbins), dtype=float)
-
-    x = np.concatenate(all_x)
-    y = np.concatenate(all_y)
-
-    hist, _, _ = np.histogram2d(
-        x, y,
-        bins=nbins,
-        range=[[-1.05, 1.05], [-1.05, 1.05]],
+    bundle = pooled_ground_truth_fes_rmsd_nhb(
+        [(dcd_helix, top_helix_pdb), (dcd_extended, top_extended_pdb)],
+        helix_ref_pdb,
+        nbins=nbins,
     )
-    return hist
+    return np.asarray(bundle["hist"], dtype=float)
 
 
 # =============================================================================
@@ -1524,6 +1727,14 @@ def _serialise_results(results: dict, path: Path) -> None:
     for strategy, iters in results.items():
         clean[strategy] = {}
         for it_key, summary in iters.items():
+            if not isinstance(summary, dict):
+                raise TypeError(
+                    f"results[{strategy!r}][{it_key!r}] must be a dict for JSON export, "
+                    f"got {type(summary).__name__}. "
+                    "If this is iteration 1 after loading iter01_results.json from cache, "
+                    "ensure the cache branch wraps the cached seed list in the same summary "
+                    "dict shape as a fresh iteration-1 run."
+                )
             clean_summary = {
                 k: v for k, v in summary.items()
                 if k != "native_tica_model"
@@ -1547,6 +1758,101 @@ def _append_iter1_cache(
     existing[strategy] = seed_results
     with open(cache_path, "w") as fh:
         json.dump(existing, fh, indent=2)
+
+
+def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            b = fh.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _system_tag_from_prod_top(prod_top_pdb: str) -> str:
+    """``A8Q2_extended_prod_top.pdb`` → ``A8Q2`` (must match seed filename prefix)."""
+    return Path(prod_top_pdb).name.split("_")[0]
+
+
+def _verify_iter1_initial_tops_consistent(
+    *,
+    output_dir: Path,
+    strategies: list[str],
+    n_seeds: int,
+    prod_top_pdb: str,
+    generator_pdb: str,
+) -> dict:
+    """Protocol gate: iteration-1 pre-DCD ``*_top.pdb`` must match across strategies.
+
+    Same generator PDB + same per-seed velocity protocol ⇒ identical Cartesian
+    coordinates before the DCD reporter starts. If hashes diverge, later
+    iterations pool inconsistent ensembles and downstream analysis is invalid.
+    """
+    if len(strategies) < 2:
+        return {
+            "passed": True,
+            "skipped": True,
+            "reason": "fewer_than_two_strategies",
+            "strategies": list(strategies),
+        }
+
+    tag = _system_tag_from_prod_top(prod_top_pdb)
+    gen_path = Path(generator_pdb)
+    gen_sha = _sha256_file(gen_path) if gen_path.is_file() else None
+
+    per_seed: list[dict] = []
+    all_ok = True
+
+    for seed_id in range(n_seeds):
+        row: dict = {"seed_id": seed_id, "sha256_top": {}}
+        hashes: dict[str, str | None] = {}
+        missing: list[str] = []
+
+        for s in strategies:
+            top = output_dir / "iter01" / s / f"{tag}_{s}_iter01_seed{seed_id:02d}_top.pdb"
+            if not top.is_file():
+                missing.append(str(top))
+                hashes[s] = None
+            else:
+                h = _sha256_file(top)
+                hashes[s] = h
+                row["sha256_top"][s] = h
+
+        if missing:
+            all_ok = False
+            row["ok"] = False
+            row["error"] = "missing_initial_top_pdb"
+            row["missing_paths"] = missing
+            per_seed.append(row)
+            continue
+
+        ref = hashes[strategies[0]]
+        same = all(hashes[s] == ref for s in strategies)
+        row["ok"] = bool(same)
+        if not same:
+            all_ok = False
+        per_seed.append(row)
+
+    out = {
+        "passed": all_ok,
+        "skipped": False,
+        "system_tag": tag,
+        "strategies": list(strategies),
+        "n_seeds": n_seeds,
+        "generator_pdb": str(generator_pdb),
+        "generator_pdb_sha256": gen_sha,
+        "per_seed": per_seed,
+    }
+    return out
+
+
+def _write_iter1_verification_json(output_dir: Path, payload: dict) -> None:
+    path = output_dir / "iter01_verification.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    log.info("Wrote iteration-1 verification audit: %s", path)
 
 
 # =============================================================================
@@ -1588,7 +1894,7 @@ def main() -> None:
     parser.add_argument(
         "--prod_top_pdb",
         required=True,
-        help="Topology PDB matching the production DCD atom ordering.",
+        help="A8Q2_extended_prod_top.pdb — topology for seed trajectories (extended box).",
     )
     parser.add_argument(
         "--gt_dcd_helix",
@@ -1599,6 +1905,23 @@ def main() -> None:
         "--gt_dcd_extended",
         required=True,
         help="Path to A8Q2_extended_prod.dcd (500 ns ground-truth).",
+    )
+    parser.add_argument(
+        "--gt_top_helix",
+        default=None,
+        help="Topology for helix GT DCD (default: {stem}_top.pdb beside helix DCD).",
+    )
+    parser.add_argument(
+        "--gt_top_extended",
+        default=None,
+        help="Topology for extended GT DCD (default: {stem}_top.pdb beside extended DCD).",
+    )
+    parser.add_argument(
+        "--helix_ref_pdb",
+        default=None,
+        help=(
+            "Ideal helix PDB for RMSD FES axis (default: {PREFIX}_helix.pdb beside prod_top_pdb)."
+        ),
     )
     parser.add_argument(
         "--tica_artifacts_dir",
@@ -1626,12 +1949,26 @@ def main() -> None:
         help="Number of seeds per iteration.",
     )
     parser.add_argument(
+        "--seed_ns",
+        type=float,
+        default=SEED_NS,
+        help="Length of each seed trajectory in nanoseconds.",
+    )
+    parser.add_argument(
         "--strategy",
         choices=["all", "random", "transferred", "native"],
         default="all",
         help=(
             "Which strategy (or strategies) to run. 'all' runs all three. "
             "Individual strategy names run only that strategy."
+        ),
+    )
+    parser.add_argument(
+        "--no-iter1-consistency-check",
+        action="store_true",
+        help=(
+            "Disable mandatory cross-strategy iteration-1 initial-topology verification. "
+            "Not recommended: invalid iter01 breaks cross-strategy comparisons."
         ),
     )
 
@@ -1670,7 +2007,11 @@ def main() -> None:
         tica_artifacts_dir=tica_dir,
         n_iterations=args.n_iterations,
         n_seeds=args.n_seeds,
-        seed_ns=SEED_NS,
+        seed_ns=args.seed_ns,
+        ground_truth_top_helix=args.gt_top_helix,
+        ground_truth_top_extended=args.gt_top_extended,
+        helix_ref_pdb=args.helix_ref_pdb,
+        skip_iter1_consistency_check=args.no_iter1_consistency_check,
     )
 
     # Print a brief convergence summary
@@ -1681,6 +2022,9 @@ def main() -> None:
         print(f"\n  Strategy: {strategy}")
         for it in sorted(results[strategy]):
             s = results[strategy][it]
+            if not isinstance(s, dict):
+                print(f"    Iter {it!r}: <expected dict summary, got {type(s).__name__}>")
+                continue
             jsd = s.get("jsd")
             cov = s.get("coverage")
             cv = s.get("cv_used", "—")
@@ -1693,4 +2037,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        root = logging.getLogger()
+        if not root.handlers:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                handlers=[logging.StreamHandler(sys.stdout)],
+            )
+        root.exception(
+            "adaptive_seeding CLI: unhandled exception (see stderr if no file handler yet)"
+        )
+        raise

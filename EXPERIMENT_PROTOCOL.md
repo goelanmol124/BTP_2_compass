@@ -1116,6 +1116,28 @@ python src/train_tica.py                      # ~20 min: lag scan + TICA + trans
 
 ### 13.4 Pod 2 Sequence
 
+**Implemented entry points (this repo):** Phase 1–4 are ``python -u -m src.simulate --system A8Q2 --phase all --output_dir outputs/btp_equil`` (writes under ``outputs/btp_equil/A8Q2/``). After both 500 ns replicas finish, run Phase 5 + feature export + adaptive seeding in one guarded pass:
+
+```bash
+# Optional: ensure repo is a git clone so pull works; copied trees have no .git
+cd /workspace/BTP_2_Calm && git pull --ff-only
+
+# While simulate is still running OR after it exits — waits for complete logs + DCDs, then continues
+nohup python -u scripts/pod2_orchestrate.py \
+  --repo-root /workspace/BTP_2_Calm \
+  --sim-output-dir /workspace/BTP_2_Calm/outputs/btp_equil/A8Q2 \
+  --tica-artifacts-dir /path/to/dir/with/a10_tica_singular_vectors_left.npy \
+  > pod2_orchestrate.log 2>&1 &
+```
+
+Or: ``bash scripts/runpod_pod2_pipeline.sh`` with ``BTP_REPO``, ``BTP_SIM_DIR``, and optional ``BTP_TICA_ARTIFACTS_DIR`` set. Omit ``--tica-artifacts-dir`` if A10 TICA files are not on the pod yet (transferred seeding strategy is skipped automatically).
+
+**Private GitHub + live MD:** Initialise git in the repo root, add ``origin``, and use a [PAT](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) in the remote URL *once* (``git remote set-url origin https://<TOKEN>@github.com/USER/REPO.git``), then ``git pull --ff-only``. Do not ``git reset --hard`` while a long MD job is writing outputs.
+
+**Orchestrator defaults (``scripts/pod2_orchestrate.py``):** ``git pull`` is **off** unless you pass ``--git-pull`` or set ``BTP_ENABLE_GIT_PULL=1`` (avoids auth errors on pods that use scp/rsync). Set ``BTP_SKIP_GIT_PULL=1`` to force-disable pull even if ``--git-pull`` were passed. A **flock** lock file ``.pod2_orchestrate.lock`` prevents two orchestrators on the same repo (use ``--no-lock`` only for debugging). Before each wait, **``src.config`` is reloaded** from disk; **``src.analysis`` is reloaded** immediately before Phase 5 so long runs pick up updated analysis code.
+
+Legacy protocol names below map to the same stages:
+
 ```bash
 python src/run_simulations.py --system A8Q2  # ~13 hrs: same as Pod 1 but for A8Q2
 python src/run_seeding.py                     # ~14 hrs: 3-strategy seeding loop

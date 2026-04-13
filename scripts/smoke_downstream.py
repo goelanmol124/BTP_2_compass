@@ -9,7 +9,7 @@ replicas of frame 0), then runs:
   - ``python -m src.tica_train`` (Phase 6)
   - ``python -m src.tica_transfer`` (Phase 7; A8Q2 arrays = copy of A10 for wiring only)
   - ``metrics.compute_jsd`` on the analysis histogram
-  - ``adaptive_seeding._build_ground_truth_histogram`` (no OpenMM)
+  - ``adaptive_seeding._build_ground_truth_histogram`` (RMSD×N_HB; needs helix ref PDB)
 
 Full ``adaptive_seeding`` MD is **not** run (needs A8Q2 Phase 3 inputs + long GPU).
 
@@ -114,7 +114,11 @@ def main() -> int:
     from src.adaptive_seeding import _build_ground_truth_histogram
 
     h_gt = _build_ground_truth_histogram(
-        str(dcd_path), str(dcd_path), str(prod_top)
+        str(dcd_path),
+        str(dcd_path),
+        str(prod_top),
+        str(prod_top),
+        helix_ref_pdb=str(helix_ref),
     )
     print(f"[smoke] _build_ground_truth_histogram shape {h_gt.shape}  sum {h_gt.sum():.0f}")
 

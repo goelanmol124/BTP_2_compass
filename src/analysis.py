@@ -27,7 +27,7 @@ import os
 import shutil
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -98,6 +98,11 @@ matplotlib.rcParams.update(
 # SECTION 1 — TRAJECTORY LOADING
 # ═════════════════════════════════════════════════════════════════════════════
 
+# MDTraj selection used for featurization (φ/ψ, N_HB, etc.): caps must be kept
+# so all backbone dihedrals match the deca-Ala + ACE/NME convention. Ground-truth
+# and seeded trajectories must use the same rule (see qc_iter1_snapshot, Phase 5).
+FEATURIZATION_ATOM_SELECTION = "protein or resname ACE or resname NME"
+
 
 def load_trajectory(
     dcd_path: str,
@@ -124,7 +129,7 @@ def load_trajectory(
 
     traj = md.load_dcd(dcd_path, top=top_pdb_path)
     if protein_only:
-        sel = traj.topology.select("protein or resname ACE or resname NME")
+        sel = traj.topology.select(FEATURIZATION_ATOM_SELECTION)
         traj = traj.atom_slice(sel)
     return traj
 
@@ -194,7 +199,7 @@ def load_helix_reference_traj(helix_ref_pdb: str) -> "md.Trajectory":
         raise FileNotFoundError(f"Helix reference PDB not found: {path.resolve()}")
 
     ref = md.load_pdb(str(path))
-    sel = ref.topology.select("protein or resname ACE or resname NME")
+    sel = ref.topology.select(FEATURIZATION_ATOM_SELECTION)
     ref = ref.atom_slice(sel)
     if ref.n_frames < 1:
         raise ValueError(f"No coordinates in helix reference: {path}")
@@ -777,6 +782,88 @@ def compute_2d_fes(
         "centers_rmsd": 0.5 * (edges_rmsd[:-1] + edges_rmsd[1:]),
         "centers_nhb": 0.5 * (edges_nhb[:-1] + edges_nhb[1:]),
     }
+
+
+def pooled_ground_truth_fes_rmsd_nhb(
+    replica_dcd_tops: list[tuple[str, str]],
+    helix_ref_pdb: str,
+    nbins: int = FES_NBINS,
+) -> dict[str, Any]:
+    """Pool production replicas and build the Phase-5 RMSD×N_HB count histogram.
+
+    Uses the same featurization selection as :func:`load_trajectory` (protein +
+    ACE/NME), :func:`compute_backbone_rmsd_to_ideal_helix`, and
+    :func:`compute_2d_fes` so reference bin edges match the 500 ns ground truth.
+
+    Parameters
+    ----------
+    replica_dcd_tops
+        List of ``(dcd_path, prod_top_pdb)`` pairs (e.g. helix-start and
+        extended-start 500 ns replicas). Missing DCDs are skipped.
+    helix_ref_pdb
+        Variant-specific ideal helix PDB (e.g. ``A8Q2_helix.pdb``).
+    nbins
+        Number of RMSD bins (``N_HB`` axis is always ``0 .. N_HB_MAX`` inclusive).
+
+    Returns
+    -------
+    dict
+        ``hist`` — raw counts, shape ``(nbins, N_HB_MAX + 1)``;
+        ``edges_rmsd``, ``edges_nhb`` — bin edges for :func:`histogram_rmsd_nhb_fixed_edges`;
+        ``f_helix`` — fraction of pooled frames with
+        ``nhb >= N_HB_MAX * NHB_HELIX_FRAC`` (protocol helix fraction).
+    """
+    all_r: list[np.ndarray] = []
+    all_nh: list[np.ndarray] = []
+
+    for dcd_path, top_pdb in replica_dcd_tops:
+        if not os.path.isfile(dcd_path):
+            continue
+        traj = load_trajectory(dcd_path, top_pdb, protein_only=True)
+        all_r.append(compute_backbone_rmsd_to_ideal_helix(traj, helix_ref_pdb))
+        all_nh.append(compute_nhb(traj).astype(np.float64))
+
+    if not all_r:
+        edges_nhb = _nhb_bin_edges()
+        edges_rmsd = np.linspace(0.0, 1.0, nbins + 1)
+        empty = np.zeros((nbins, N_HB_MAX + 1), dtype=float)
+        return {
+            "hist": empty,
+            "edges_rmsd": edges_rmsd,
+            "edges_nhb": edges_nhb,
+            "f_helix": float("nan"),
+        }
+
+    r_cat = np.concatenate(all_r)
+    nh_cat = np.concatenate(all_nh)
+    fes = compute_2d_fes(r_cat, nh_cat, nbins=nbins)
+    thr = float(N_HB_MAX * NHB_HELIX_FRAC)
+    f_helix = float((nh_cat >= thr).mean())
+
+    return {
+        "hist": np.asarray(fes["hist"], dtype=float),
+        "edges_rmsd": np.asarray(fes["edges_rmsd"]),
+        "edges_nhb": np.asarray(fes["edges_nhb"]),
+        "f_helix": f_helix,
+    }
+
+
+def histogram_rmsd_nhb_fixed_edges(
+    rmsd: np.ndarray,
+    nhb: np.ndarray,
+    edges_rmsd: np.ndarray,
+    edges_nhb: np.ndarray,
+) -> np.ndarray:
+    """2D histogram on a fixed RMSD×N_HB grid (same edges as ground truth)."""
+    r = np.asarray(rmsd, dtype=np.float64)
+    nh = np.asarray(nhb, dtype=np.float64)
+    mask = np.isfinite(r) & np.isfinite(nh)
+    hist, _, _ = np.histogram2d(
+        r[mask],
+        nh[mask],
+        bins=[edges_rmsd, edges_nhb],
+    )
+    return hist
 
 
 def compute_1d_fes_nhb(

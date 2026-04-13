@@ -24,7 +24,11 @@ pip install 'openmm[cuda12]' pdbfixer mdtraj biopython numpy PeptideBuilder
 python -m openmm.testInstallation
 ```
 
-Add other packages your workflow needs (e.g. from this repo’s imports).
+Add other packages your workflow needs (e.g. from this repo’s imports). For **`scripts/pod_post_seeding_chain.py`** (Phase 9 figures via `src.metrics`), the same venv needs at least **`pandas`** (and already uses **`matplotlib`**, **`numpy`**, **`scipy`**):
+
+```bash
+pip install pandas
+```
 
 ## CUDA error: `CUDA_ERROR_UNSUPPORTED_PTX_VERSION (222)`
 

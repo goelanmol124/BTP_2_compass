@@ -227,13 +227,13 @@ Fraction of N_HB_MAX used as the helix threshold.
 f_helix = fraction of frames where nhb >= N_HB_MAX * NHB_THRESHOLD_FRAC = 3.
 """
 
-SEEDING_N_ITER: int = 5
+SEEDING_N_ITER: int = 4
 """Number of adaptive seeding iterations per strategy."""
 
-SEEDING_N_SEEDS: int = 8
+SEEDING_N_SEEDS: int = 6
 """Number of seed simulations launched per iteration."""
 
-SEEDING_SEED_NS: float = 30.0
+SEEDING_SEED_NS: float = 25.0
 """Duration of each individual seed simulation in nanoseconds."""
 
 STRATEGY_COLORS: dict = {
@@ -353,17 +353,16 @@ Below 0.70: fall back to N_HB as CV for adaptive seeding."""
 # SEEDING PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-SEED_NS: float = 30.0
-"""Duration of each seed simulation. At 330 K τ_fold ≈ 40–115 ns,
-so 30 ns has ~23–52% probability of at least one helix-coil transition."""
+SEED_NS: float = 25.0
+"""Duration of each seed simulation. Reduced-budget setting for RunPod runtime control."""
 
-N_SEEDS: int = 8
+N_SEEDS: int = 6
 """Seeds per iteration. Balances exploration (diverse starting points) vs
 depth (enough time per seed to leave a basin). HTMD typically uses 10–15."""
 
-N_ITERATIONS: int = 5
+N_ITERATIONS: int = 4
 """Total adaptive seeding iterations per strategy.
-Budget: 3 strategies × 5 iter × 8 seeds × 30 ns = 3600 ns total."""
+Budget: 3 strategies × 4 iter × 6 seeds × 25 ns = 1800 ns total."""
 
 N_STRATEGIES: int = 3
 """Number of seeding strategies: Random, Transferred TICA, Native TICA."""
