@@ -3,7 +3,9 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.tar
 
+/btp_parts/
 /outputs/
 
 # Large OpenMM output files

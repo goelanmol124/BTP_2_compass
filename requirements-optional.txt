@@ -1,0 +1,12 @@
+# Core dependencies plus optional packages (Mongo, notebooks, OpenMM extras).
+# pip install -r requirements-optional.txt
+
+-r requirements.txt
+
+pymongo>=4.0
+pdbfixer
+biopython
+PeptideBuilder
+jupyter>=1.0
+ipykernel>=6.0
+openmmforcefields>=0.11

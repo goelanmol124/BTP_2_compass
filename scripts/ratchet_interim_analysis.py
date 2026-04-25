@@ -8,9 +8,14 @@ Reads the current ratchet_manifest.json and generates:
   5. Scatter of seed origins (which bins were selected)
 
 Does NOT write any DCD or modify the manifest.
+
+Usage:
+  python scripts/ratchet_interim_analysis.py
+  python scripts/ratchet_interim_analysis.py --output-dir outputs/ratchet_demo_50ns_run_new
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -41,13 +46,14 @@ GT_TOP_HELIX = A8Q2_DIR / "A8Q2_helix_prod_top.pdb"
 GT_TOP_EXTENDED = A8Q2_DIR / "A8Q2_extended_prod_top.pdb"
 HELIX_REF_PDB = A8Q2_DIR / "A8Q2_helix.pdb"
 
-OUTPUT_DIR = _ROOT / "outputs" / "ratchet_demo_50ns"
-MANIFEST_PATH = OUTPUT_DIR / "ratchet_manifest.json"
+DEFAULT_OUTPUT_DIR = _ROOT / "outputs" / "ratchet_demo_50ns"
 GT_DT_NS = 0.1
 
 
-def main() -> None:
-    with open(MANIFEST_PATH, encoding="utf-8") as f:
+def main(output_dir: Path) -> None:
+    output_dir = output_dir.resolve()
+    manifest_path = output_dir / "ratchet_manifest.json"
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     ordered = manifest["ordered_runs"]
@@ -139,9 +145,9 @@ def main() -> None:
     ax.legend(fontsize=11)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / "interim_coverage_curve.png", dpi=200)
+    fig.savefig(output_dir / "interim_coverage_curve.png", dpi=200)
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'interim_coverage_curve.png'}")
+    print(f"Saved: {output_dir / 'interim_coverage_curve.png'}")
 
     # ---- Plot 2: Min RMSD evolution ----
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -153,9 +159,9 @@ def main() -> None:
     ax.legend(fontsize=11)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / "interim_min_rmsd_curve.png", dpi=200)
+    fig.savefig(output_dir / "interim_min_rmsd_curve.png", dpi=200)
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'interim_min_rmsd_curve.png'}")
+    print(f"Saved: {output_dir / 'interim_min_rmsd_curve.png'}")
 
     # ---- Plot 3: Max NHB evolution ----
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -167,9 +173,9 @@ def main() -> None:
     ax.legend(fontsize=11)
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / "interim_max_nhb_curve.png", dpi=200)
+    fig.savefig(output_dir / "interim_max_nhb_curve.png", dpi=200)
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'interim_max_nhb_curve.png'}")
+    print(f"Saved: {output_dir / 'interim_max_nhb_curve.png'}")
 
     # ---- Plot 4: RMSD distribution comparison at current budget ----
     all_r = np.concatenate(cum_rmsd) if cum_rmsd else np.array([])
@@ -197,9 +203,9 @@ def main() -> None:
     axes[1].legend(fontsize=10)
 
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / "interim_distributions.png", dpi=200)
+    fig.savefig(output_dir / "interim_distributions.png", dpi=200)
     plt.close(fig)
-    print(f"Saved: {OUTPUT_DIR / 'interim_distributions.png'}")
+    print(f"Saved: {output_dir / 'interim_distributions.png'}")
 
     # ---- Print summary table ----
     print("\n" + "=" * 80)
@@ -256,4 +262,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Directory with ratchet_manifest.json (default: {DEFAULT_OUTPUT_DIR.relative_to(_ROOT)}).",
+    )
+    args = ap.parse_args()
+    main(output_dir=args.output_dir)

@@ -1,0 +1,33 @@
+# BTP_2_Calm — pip install -r requirements.txt
+# Full stack (core + optional): pip install -r requirements-optional.txt
+# OpenMM with CUDA: see OPENMM_INSTALL.md (e.g. pip install 'openmm[cuda12]')
+
+numpy>=1.23,<3
+scipy>=1.10
+matplotlib>=3.7
+pandas>=2.0
+mdtraj>=1.9.7
+
+# MD simulation
+openmm>=8.0
+
+# TICA (src/tica_train.py, src/tica_transfer.py)
+deeptime>=0.4
+
+# SPIB — State Predictive Information Bottleneck (src/spib_lib.py,
+# scripts/train_spib_a10.py, scripts/ratchet_spib_50ns.py)
+torch>=2.0
+scikit-learn>=1.2
+
+# DSSP and trajectory analysis (src/analysis.py)
+MDAnalysis>=2.8
+
+# -----------------------------------------------------------------------------
+# Optional (not installed by default; use requirements-optional.txt for all)
+# -----------------------------------------------------------------------------
+# pymongo          — MongoDB helpers in src/utils.py when MONGO_URI is set
+# pdbfixer         — PDB preparation for OpenMM (see OPENMM_INSTALL.md)
+# biopython        — Common companion for sequence/structure workflows
+# PeptideBuilder   — Peptide building (referenced in OPENMM_INSTALL.md)
+# jupyter, ipykernel — Run A10_Prod_Run.ipynb, A8Q2_Prod_Run.ipynb, Analysis_FES_Transitions.ipynb
+# openmmforcefields — Alternative CHARMM/OpenMM setup path (EXPERIMENT_PROTOCOL.md)
