@@ -87,7 +87,7 @@ def main() -> int:
         print(
             "ERROR: TICA artefacts not found. Expected:\n"
             f"  {mean_path}\n  {vec_path}\n"
-            "Run: python -m src.tica_train ... (see EXPERIMENT_PROTOCOL Phase 6)."
+            "Run: python -m src.tica_train ... (see docs/EXPERIMENT_PROTOCOL.md Phase 6)."
         )
         return 1
 

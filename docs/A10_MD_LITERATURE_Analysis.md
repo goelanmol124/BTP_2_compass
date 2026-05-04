@@ -495,7 +495,7 @@ The extended A10 conformation is ~3.5 nm end-to-end. The solvated box with 1.5 n
 |-------|------------|-----------|-----------------|
 | Nonbonded cutoff | 1.0 nm (too short) | **1.2 nm** | CHARMM36m parameterized at 1.2 nm [1,7] |
 | VDW switch | Not set (hard cutoff) | **switchDistance=1.0 nm** | Force-switching from 10→12 Å [7] |
-| NPT duration (A10_Prod_Run) | 5 ns | **10 ns** | Kuczera 2021 uses 10 ns minimum [1] |
+| NPT duration (legacy notebook / `src.simulate`) | 5 ns | **10 ns** | Kuczera 2021 uses 10 ns minimum [1] |
 | Water model (Experiment.ipynb) | tip3p-pme-b.xml | **water.xml** (standard TIP3P) | CHARMM TIP3P is in water.xml [7] |
 | NPT equilibration (Experiment) | 100 ps = 0.1 ns | **5 ns** | Density requires ≥ few ns to converge |
 | NVT equilibration (Experiment) | 100 ps = 0.1 ns | **1 ns** | Minimum for water relaxation |

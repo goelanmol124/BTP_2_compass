@@ -1,7 +1,7 @@
 """
 adaptive_seeding.py — Three-strategy adaptive seeding experiment for A8Q2.
 
-Implements the Phase 8 adaptive seeding protocol from EXPERIMENT_PROTOCOL.md §11.
+Implements the Phase 8 adaptive seeding protocol from docs/EXPERIMENT_PROTOCOL.md §11.
 Three strategies are run in parallel for N_ITERATIONS iterations of N_SEEDS seeds
 of SEED_NS nanoseconds each:
 
@@ -27,7 +27,7 @@ References
 ----------
   Hruska et al. J. Chem. Phys. 149, 244119 (2018)  — metastable least-counts
   Doerr & De Fabritiis. J. Chem. Theory Comput. 10, 2064 (2014)  — HTMD seeding
-  EXPERIMENT_PROTOCOL.md §11 — full protocol specification
+  docs/EXPERIMENT_PROTOCOL.md §11 — full protocol specification
 """
 
 from __future__ import annotations
@@ -308,7 +308,7 @@ def project_cv(
         eigenvectors. The projection is:
             z = (features − mean_donor) @ eigenvectors_donor[:, 0]
         This is the TICA projection equation applied cross-system (transfer).
-        See EXPERIMENT_PROTOCOL.md §8.2 for the transfer metric derivation.
+        See docs/EXPERIMENT_PROTOCOL.md §8.2 for the transfer metric derivation.
 
     ``'native'``
         If ``cv_model`` is a fitted deeptime TICA model: project using its
@@ -515,7 +515,7 @@ def _try_train_native_tica(
 ) -> tuple[Optional[object], str]:
     """Attempt to train a native TICA model on pooled A8Q2 data.
 
-    Schedule (EXPERIMENT_PROTOCOL.md §11.3):
+    Schedule (docs/EXPERIMENT_PROTOCOL.md §11.3):
     - Iterations 1–2 (``iteration < TICA_DEFER_UNTIL``): return (None, 'nhb').
       N_HB is used as stand-in CV — no TICA training needed.
     - Iteration ≥ TICA_DEFER_UNTIL: attempt TICA training, then validate:
@@ -664,7 +664,7 @@ def run_seed(
 ) -> dict:
     """Run one 30 ns NVT seed from a frame selected from the pooled trajectory.
 
-    Implementation follows EXPERIMENT_PROTOCOL.md §11.4 exactly:
+    Implementation follows docs/EXPERIMENT_PROTOCOL.md §11.4 exactly:
 
     1. Load the pooled trajectory DCD against ``prod_top_pdb`` (full system:
        protein + water + ions).

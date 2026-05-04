@@ -1398,4 +1398,4 @@ Filled in after running the experiment:
 
 ---
 
-*Document version: 1.0 | April 2026 | Generated from experimental protocol, existing notebooks (A10_Prod_Run.ipynb, A8Q2_Prod_Run.ipynb, Analysis_FES_Transitions.ipynb), literature review (A10_MD_Literature_Analysis.md), and distributed architecture planning.*
+*Document version: 1.0 | April 2026 | Generated from experimental protocol, MD driver ``src/simulate.py``, analysis notebook ``Analysis_FES_Transitions.ipynb``, literature review (A10_MD_Literature_Analysis.md), and distributed architecture planning.*

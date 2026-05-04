@@ -1,6 +1,10 @@
 """
 simulate.py — Phase 1–4 MD simulations for the BTP CV-transfer study.
 
+**This module is the only supported driver for A10/A8Q2 setup → production MD**
+(legacy ``A10_Prod_Run.ipynb`` / ``A8Q2_Prod_Run.ipynb`` were retired after parity
+review against this file and ``src/config.py``).
+
 Handles all MD simulation phases for both peptide systems:
   Phase 1 — Structure preparation (ACE/CT3 capped peptide building)
   Phase 2 — Parameterization and solvation (CHARMM36m + mTIP3P)
@@ -13,16 +17,17 @@ Systems:
 
 Usage
 -----
-Run as a script::
+Run as a script (default ``--output_dir`` is ``outputs/btp_equil``; each system
+writes under ``outputs/btp_equil/A10`` or ``.../A8Q2``)::
 
-    python -m src.simulate --system A10  --phase all --output_dir outputs/A10
+    python -m src.simulate --system A10  --phase all
     python -m src.simulate --system A8Q2 --phase equil
     python -m src.simulate --system both --phase all
 
 Or import for programmatic use::
 
     from src.simulate import run_system
-    run_system(prefix="A10", sequence=["ALA"]*10, output_dir=Path("outputs/A10"))
+    run_system(prefix="A10", sequence=["ALA"]*10, output_dir=Path("outputs/btp_equil/A10"))
 
 Critical design notes
 ---------------------
@@ -78,6 +83,7 @@ except ImportError:
 
 from src.config import (
     SEQUENCES,
+    CONFORMATIONS,
     TEMPERATURE_K,
     PRESSURE_BAR,
     FRICTION_PS,
@@ -1570,10 +1576,8 @@ def run_system(
         f"({PROD_US:g} µs; {PROD_STEPS:,} steps)"
     )
 
-    conformation_defs = [
-        (-120.0, 140.0, "extended"),
-        (-57.0,  -47.0, "helix"),
-    ]
+    # φ/ψ / filenames match ``src.config.CONFORMATIONS`` (single source of truth).
+    conformation_defs = [(phi, psi, lab) for phi, psi, lab in CONFORMATIONS]
 
     # ── Phase 1: Build ────────────────────────────────────────────────────
     if phases in ("build", "all"):
@@ -1828,8 +1832,12 @@ Examples:
     )
     parser.add_argument(
         "--output_dir",
-        default=".",
-        help="Root output directory (created if needed). Default: current directory.",
+        default="outputs/btp_equil",
+        help=(
+            "Root output directory (created if needed). "
+            "Per-system runs write under ``<output_dir>/A10`` and ``.../A8Q2``. "
+            "Default matches downstream scripts that expect outputs/btp_equil/."
+        ),
     )
     args = parser.parse_args()
 

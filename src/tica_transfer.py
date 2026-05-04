@@ -2,7 +2,7 @@
 tica_transfer.py — TICA collective variable transferability assessment.
 
 Implements the Moffett & Shukla (arXiv:1710.00443) transfer metrics and the
-full transferability pipeline from EXPERIMENT_PROTOCOL.md § 10 (Phase 7).
+full transferability pipeline from docs/EXPERIMENT_PROTOCOL.md § 10 (Phase 7).
 
 Systems
 -------
@@ -63,7 +63,7 @@ from src.config import TEMPERATURE_K
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Protocol constants (from EXPERIMENT_PROTOCOL.md § 9)
+# Protocol constants (from docs/EXPERIMENT_PROTOCOL.md § 9)
 # ─────────────────────────────────────────────────────────────────────────────
 
 TICA_DIM: int = 5

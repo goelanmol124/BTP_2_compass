@@ -1,8 +1,9 @@
 """
 config.py — Single source of truth for all simulation constants.
 
-All values match exactly the validated A10 and A8Q2 notebooks. Importing
-this module in simulate.py, analyze.py, and seed.py guarantees every phase
+All values match the validated MD pipeline previously captured in the retired
+``A10_Prod_Run.ipynb`` / ``A8Q2_Prod_Run.ipynb`` (now ``python -m src.simulate`` only).
+Importing this module in simulate.py, analyze.py, and seed.py guarantees every phase
 uses the same parameters with no risk of silent divergence.
 """
 
@@ -96,9 +97,9 @@ Storage: ~240 MB per DCD at ~48 KB/frame for ~5000 atoms.
 
 CHK_INTERVAL_PS: float = 1000.0
 """
-Checkpoint every 1000 ps (1 ns). Matches ``A10_Prod_Run.ipynb`` and
-``A8Q2_Prod_Run.ipynb`` (lose at most ~1 ns on crash). Some protocol drafts
-used 5000 ps for remote pods; override here if you prefer rarer, larger checkpoints.
+Checkpoint every 1000 ps (1 ns). Matches the legacy notebook-era protocol
+(lose at most ~1 ns on crash). Some protocol drafts used 5000 ps for remote pods;
+override here if you prefer rarer, larger checkpoints.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

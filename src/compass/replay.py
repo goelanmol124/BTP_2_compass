@@ -1,4 +1,10 @@
-"""Retrospective COMPASS-Lite replay on cached A10/A8Q2 feature arrays.
+"""Retrospective COMPASS replay on cached A10/A8Q2 feature arrays.
+
+.. deprecated:: COMPASS-v2
+
+    Prefer :mod:`src.compass.v2` for headline benchmarks —
+    oracle chunk replay (full-library candidates) is **diagnostic only** and is
+    not online-faithful for seed-selection acceleration. See ``COMPASS_PLAN.md``.
 
 This is the first-layer BTP test: no DCD reading and no new MD.  It treats the
 existing A8Q2 production frames as a library of short chunks, then asks whether a
@@ -8,7 +14,7 @@ faster than random chunk acquisition.
 Selection rule
 --------------
 The policy must not use RMSD, NHB, or helix labels for guidance.  Those are
-reserved for evaluation only.  COMPASS-Lite selects chunks using only transferred
+reserved for evaluation only.  COMPASS selects chunks using only transferred
 source-map coordinates derived from generic torsion features (A10 TICA here).
 
 Important limitation
@@ -26,6 +32,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+import warnings
 
 import matplotlib
 
@@ -42,7 +49,7 @@ DEFAULT_HELIX_NHB_THRESHOLD = 3
 
 @dataclass(frozen=True)
 class Atlas:
-    """Source map used by COMPASS-Lite."""
+    """Source map used by COMPASS."""
 
     source_xy: np.ndarray
     target_xy: np.ndarray
@@ -70,6 +77,7 @@ class ReplayConfig:
     softmax_temperature: float = 0.0
     map_kind: str = "tica2d"
     n_bins_y: int | None = None
+    bin_edges_mode: str = "source_only"
 
 
 def _load_npy(path: Path) -> np.ndarray:
@@ -93,6 +101,12 @@ def _hist2d_xy(xy: np.ndarray, x_edges: np.ndarray, y_edges: np.ndarray) -> np.n
 
     x = np.asarray(xy[:, 0], dtype=float)
     y = np.asarray(xy[:, 1], dtype=float)
+    rx = max(float(x_edges[-1] - x_edges[0]), 1e-12)
+    ry = max(float(y_edges[-1] - y_edges[0]), 1e-12)
+    eps_x = max(1e-12, 1e-6 * rx)
+    eps_y = max(1e-12, 1e-6 * ry)
+    x = np.clip(x, x_edges[0] + eps_x, x_edges[-1] - eps_x)
+    y = np.clip(y, y_edges[0] + eps_y, y_edges[-1] - eps_y)
     hist, _, _ = np.histogram2d(x, y, bins=[x_edges, y_edges])
     return hist.astype(float)
 
@@ -120,20 +134,30 @@ def _coverage(hist_ref: np.ndarray, hist_sample: np.ndarray, min_count: int = 3)
     return float(np.mean(hist_sample[mask] > 0.0))
 
 
-def _build_edges(source_x: np.ndarray, target_x: np.ndarray, n_bins_x: int) -> np.ndarray:
-    """Robust shared histogram edges for source and target projections."""
+def _build_edges_source_only(source_x: np.ndarray, n_bins: int) -> np.ndarray:
+    """Histogram edges from source latent samples only (deployable / no target leakage)."""
 
-    both = np.concatenate([source_x, target_x])
+    z = np.asarray(source_x, dtype=float).ravel()
+    z = z[np.isfinite(z)]
+    if z.size == 0:
+        return np.linspace(-1.0, 1.0, n_bins + 1)
+    lo, hi = np.percentile(z, [0.5, 99.5])
+    pad = 0.08 * max(float(hi - lo), 1e-6)
+    return np.linspace(float(lo - pad), float(hi + pad), n_bins + 1)
+
+
+def _build_edges_pooled(source_x: np.ndarray, target_x: np.ndarray, n_bins: int) -> np.ndarray:
+    """Legacy: edges from pooled source+target percentiles (retrospective diagnostic)."""
+
+    both = np.concatenate(
+        [np.asarray(source_x, dtype=float).ravel(), np.asarray(target_x, dtype=float).ravel()]
+    )
+    both = both[np.isfinite(both)]
+    if both.size == 0:
+        return np.linspace(-1.0, 1.0, n_bins + 1)
     lo, hi = np.percentile(both, [0.5, 99.5])
     pad = 0.08 * max(float(hi - lo), 1e-6)
-    x_edges = np.linspace(float(lo - pad), float(hi + pad), n_bins_x + 1)
-    return x_edges
-
-
-def _build_xy_edges(source_xy: np.ndarray, target_xy: np.ndarray, n_bins_x: int) -> tuple[np.ndarray, np.ndarray]:
-    x_edges = _build_edges(source_xy[:, 0], target_xy[:, 0], n_bins_x)
-    y_edges = _build_edges(source_xy[:, 1], target_xy[:, 1], n_bins_x)
-    return x_edges, y_edges
+    return np.linspace(float(lo - pad), float(hi + pad), n_bins + 1)
 
 
 def build_tica_atlas(
@@ -141,6 +165,7 @@ def build_tica_atlas(
     n_bins_x: int = 30,
     n_bins_y: int | None = None,
     map_kind: str = "tica2d",
+    bin_edges_mode: str = "source_only",
 ) -> tuple[Atlas, dict[str, np.ndarray]]:
     """Load cached arrays and build the A10 source atlas in transferred TICA space."""
 
@@ -166,11 +191,22 @@ def build_tica_atlas(
 
     if n_bins_y is None:
         n_bins_y = n_bins_x
-    x_edges = _build_edges(source_xy[:, 0], target_xy[:, 0], n_bins_x)
-    if map_kind == "tica1d":
-        y_edges = np.array([-1.0, 1.0])
+    if bin_edges_mode == "source_only":
+        x_edges = _build_edges_source_only(source_xy[:, 0], n_bins_x)
+        y_edges = (
+            np.array([-1.0, 1.0])
+            if map_kind == "tica1d"
+            else _build_edges_source_only(source_xy[:, 1], n_bins_y)
+        )
+    elif bin_edges_mode == "pooled":
+        x_edges = _build_edges_pooled(source_xy[:, 0], target_xy[:, 0], n_bins_x)
+        y_edges = (
+            np.array([-1.0, 1.0])
+            if map_kind == "tica1d"
+            else _build_edges_pooled(source_xy[:, 1], target_xy[:, 1], n_bins_y)
+        )
     else:
-        y_edges = _build_edges(source_xy[:, 1], target_xy[:, 1], n_bins_y)
+        raise ValueError(f"Unknown bin_edges_mode: {bin_edges_mode}")
     source_hist = _hist2d_xy(source_xy, x_edges, y_edges)
 
     smooth = source_hist + 1.0
@@ -266,7 +302,7 @@ def _compass_scores(
     bin_attempts: np.ndarray,
     variant: str,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Compute COMPASS-Lite score for each chunk start."""
+    """Compute COMPASS score for each chunk start."""
 
     bx, by = chunk_bins
     source_boundary = atlas.free_energy_score[bx, by]
@@ -373,7 +409,7 @@ def run_compass_replay(
     start_chunk: int = 0,
     rng: np.random.Generator | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Run one COMPASS-Lite retrospective replay (deterministic if temperature == 0)."""
+    """Run one COMPASS retrospective replay (deterministic if temperature == 0)."""
 
     chunks = _chunk_slices(len(target_nhb), cfg.chunk_frames)
     n_chunks = len(chunks)
@@ -397,7 +433,7 @@ def run_compass_replay(
         bin_attempts[bx0, by0] += 1
         metrics = _evaluate(chunks, selected, atlas.target_xy, ref_hist, atlas, target_nhb, cfg.helix_nhb_threshold)
         metric_rows.append({
-            "policy": "COMPASS-Lite",
+            "policy": "COMPASS",
             "variant": cfg.variant,
             "step": 1,
             "selected_chunks": 1,
@@ -450,7 +486,7 @@ def run_compass_replay(
         metrics = _evaluate(chunks, selected, atlas.target_xy, ref_hist, atlas, target_nhb, cfg.helix_nhb_threshold)
         metric_rows.append(
             {
-                "policy": "COMPASS-Lite",
+                "policy": "COMPASS",
                 "variant": cfg.variant,
                 "step": step,
                 "selected_chunks": len(selected),
@@ -531,7 +567,7 @@ def plot_curves(compass_df: pd.DataFrame, random_summary: pd.DataFrame, output_d
         cm = compass_summary[f"{metric}_mean"]
         cs = compass_summary[f"{metric}_std"].fillna(0.0)
         cx = compass_summary["sampled_ns"]
-        ax.plot(cx, cm, label="COMPASS-Lite", lw=2.4, color="#D1495B")
+        ax.plot(cx, cm, label="COMPASS", lw=2.4, color="#D1495B")
         if (cs > 0).any():
             ax.fill_between(cx, cm - cs, cm + cs, color="#D1495B", alpha=0.18)
         mean = random_summary[f"{metric}_mean"]
@@ -574,7 +610,7 @@ def plot_map(atlas: Atlas, target_nhb: np.ndarray, decisions: pd.DataFrame, outp
         ax.text(row["start_tica1"], row["start_tica2"], str(int(row["step"])), fontsize=7)
     ax.set_xlabel("A10 transferred TICA-1")
     ax.set_ylabel("A10 transferred TICA-2")
-    ax.set_title("COMPASS-Lite choices in transferred TICA space")
+    ax.set_title("COMPASS choices in transferred TICA space")
     ax.grid(alpha=0.2)
     fig.colorbar(sc, ax=ax, label="NHB")
     ax.legend(frameon=False, loc="best")
@@ -587,7 +623,7 @@ def plot_reason_counts(decisions: pd.DataFrame, output_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(6, 4), constrained_layout=True)
     counts.plot(kind="bar", ax=ax, color="#4C78A8")
     ax.set_ylabel("selected chunks")
-    ax.set_title("Why COMPASS-Lite selected chunks")
+    ax.set_title("Why COMPASS selected chunks")
     ax.grid(axis="y", alpha=0.25)
     fig.savefig(output_dir / "compass_reason_counts.png", dpi=250)
     plt.close(fig)
@@ -604,7 +640,7 @@ def write_summary(
     final_compass = summary_compass.iloc[-1].to_dict()
     final_random = random_summary.iloc[-1].to_dict()
     summary = {
-        "method": "COMPASS-Lite retrospective chunk acquisition",
+        "method": "COMPASS retrospective chunk acquisition",
         "map": "A10 transferred TICA-1 x TICA-2",
         "chunk_frames": cfg.chunk_frames,
         "variant": cfg.variant,
@@ -612,12 +648,14 @@ def write_summary(
         "n_steps": int(compass_df["step"].max()),
         "random_repeats": cfg.random_repeats,
         "support_threshold": atlas.support_threshold,
+        "bin_edges_mode": cfg.bin_edges_mode,
         "final_compass": final_compass,
         "final_random_mean": final_random,
         "notes": [
             "No DCD reading or new MD; this is a first-layer replay over cached arrays.",
             "Candidate chunks are known retrospectively, so results validate scoring logic rather than online feasibility.",
             "RMSD/NHB/helix labels are not used for selection; NHB is used only for post-hoc evaluation.",
+            "Bin edges default to source_only (A10 percentiles). Target points outside are clipped into the outer bins for histograms.",
         ],
     }
     with open(output_dir / "compass_replay_summary.json", "w", encoding="utf-8") as f:
@@ -625,6 +663,12 @@ def write_summary(
 
 
 def main(argv: list[str] | None = None) -> None:
+    warnings.warn(
+        "src.compass.replay is deprecated as a headline benchmark. "
+        "Use src.compass.v2 bench for seed-selection with equivalence-cloud candidates.",
+        DeprecationWarning,
+        stacklevel=1,
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/compass/replay_tica"))
@@ -640,11 +684,17 @@ def main(argv: list[str] | None = None) -> None:
         "--variant",
         choices=["balanced", "exploratory", "source_only", "pure_frontier"],
         default="balanced",
-        help="COMPASS-Lite scoring variant.",
+        help="COMPASS scoring variant.",
     )
     parser.add_argument("--compass-repeats", type=int, default=1)
     parser.add_argument("--softmax-temperature", type=float, default=0.0)
     parser.add_argument("--start-chunk", type=int, default=0)
+    parser.add_argument(
+        "--bin-edges",
+        choices=["source_only", "pooled"],
+        default="source_only",
+        help="source_only: grid from A10 latent only (deployable). pooled: legacy retrospective grid from A10+A8Q2.",
+    )
     args = parser.parse_args(argv)
 
     repo_root = args.repo_root.resolve()
@@ -665,6 +715,7 @@ def main(argv: list[str] | None = None) -> None:
         softmax_temperature=args.softmax_temperature,
         map_kind=args.map_kind,
         n_bins_y=args.n_bins_y,
+        bin_edges_mode=args.bin_edges,
     )
 
     atlas, arrays = build_tica_atlas(
@@ -672,6 +723,7 @@ def main(argv: list[str] | None = None) -> None:
         n_bins_x=cfg.n_bins_x,
         n_bins_y=cfg.n_bins_y,
         map_kind=cfg.map_kind,
+        bin_edges_mode=cfg.bin_edges_mode,
     )
     target_nhb = arrays["a8q2_nhb"]
 

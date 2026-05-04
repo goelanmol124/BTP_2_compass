@@ -18,7 +18,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_ASSIGNMENTS = Path("outputs/spib_a10_analysis_z2/spib_a10_frame_assignments.npz")
+DEFAULT_ASSIGNMENTS = Path(
+    "archive/outputs_legacy/spib_a10_analysis_z2/spib_a10_frame_assignments.npz"
+)
 DEFAULT_OUTPUT_DIR = Path("outputs/spib_a10_analysis_z2")
 FRAME_SPACING_NS = 0.1
 CONFORMATIONS = ("helix-like", "transition", "open-like")

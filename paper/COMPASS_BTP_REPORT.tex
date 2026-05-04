@@ -1,0 +1,207 @@
+% IIT Delhi BTP Project Report: structure aligned with BTP_Report_Format.docx
+% Body text: Times New Roman 12pt equivalent; A4; 1 in margins (matching template sectPr)
+\documentclass[12pt,a4paper,oneside]{report}
+
+\usepackage[T1]{fontenc}
+% UTF-8 is the engine default for modern TeX (tectonic, pdfTeX in TeX Live); loading inputenc only emits a harmless warning.
+\usepackage{mathptmx}
+\usepackage{mathtools}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{caption}
+\captionsetup{justification=raggedright,singlelinecheck=false}
+\usepackage{graphicx}
+\usepackage{siunitx}
+\usepackage{xurl}
+\makeatletter
+\g@addto@macro\UrlBreaks{\do\/\do\_}
+\makeatother
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.5}
+\emergencystretch=2.5em
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage[numbers,sort&compress]{natbib}
+\renewcommand{\bibfont}{\raggedright\sloppy}
+\usepackage{tocloft}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+% List of Equations (department sample TOC includes this entry).
+% Equation titles are written via manual \addcontentsline after each equation in the body/SI.
+\newcommand{\listequationname}{List of Equations}
+\newlistof{eqloe}{loe}{\listequationname}
+
+% Centered, numbered chapter titles (analogous to Word ``Heading 1'' in BTP_Report_Format.docx)
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\centering}
+  {\chaptertitlename\ \thechapter}{12pt}{\large}
+
+\graphicspath{{../figures/}}
+\sisetup{detect-all}
+
+% Build from ``paper/``: tectonic --reruns 8 COMPASS_BTP_REPORT.tex (extra passes settle ToC/LoF/bibliography)
+%        OR  pdflatex + bibtex + pdflatex ×2
+\begin{document}
+\hypersetup{pdftitle={COMPASS: Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling},pdfauthor={Anmol Goel}}
+% Avoid duplicate PDF named destinations on the title page (xdvipdfmx: @page.1 already defined).
+\hypersetup{pageanchor=false}
+
+% === Title page (mirrors BTP template layout)
+\begin{titlepage}
+\centering
+% IIT Delhi logo only. The Word template also unpacked image2--image4 (tiny demo plots from
+% the template document, not institute branding); those are omitted here.
+\includegraphics[height=2.0cm]{btp_template_assets/image1.png}\par
+\vspace*{1.0cm}
+{\Large\bfseries COMPASS: Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling\par}
+\vspace{0.4cm}
+{\large Transferring Source MD Landscapes to Guide Adaptive Seeding of Related Mutants\par}
+\vspace{1.2cm}
+{\large A PROJECT REPORT\par}
+\vspace{0.8cm}
+{\normalsize Submitted as part of BBD452 BTech Major Project (BB1)\par}
+\vfill
+{\normalsize\textbf{Submitted by:} Anmol Goel \quad (Entry No.\ 2022BB11000)\par}
+\vspace{0.6cm}
+{\normalsize\textbf{Guided by:} Prof.\ Ishaan Gupta\par}
+\vspace{1.4cm}
+{\normalsize\textbf{DEPARTMENT OF BIOCHEMICAL ENGINEERING AND BIOTECHNOLOGY}\par
+{\normalsize INDIAN INSTITUTE OF TECHNOLOGY DELHI\par}}
+\vspace{1cm}
+{\normalsize May 5, 2026\par}
+\vspace*{1.2cm}
+\end{titlepage}
+
+\hypersetup{pageanchor=true}
+\pagenumbering{roman}
+\setcounter{page}{2}
+
+% === Declaration
+\phantomsection
+\chapter*{Declaration}
+\addcontentsline{toc}{chapter}{Declaration}
+
+I certify that
+\begin{enumerate}[label=\alph*), itemsep=0.45ex]
+\item The work contained in this report is original and has been done by me under the guidance of my supervisor.
+\item I have followed the guidelines provided by the Department in preparing the report.
+\item I have conformed to the norms and guidelines given in the Honor Code of Conduct of the Institute.
+\item Whenever I have used materials (data, theoretical analysis, figures, and text) from other sources, I have given due credit to them by citing them in the text of the report and giving their details in the references. Further, I have taken permission from the copyright owners of the sources, whenever necessary.
+\end{enumerate}
+
+\vspace{1.5cm}
+\noindent\textbf{Signed by:}\\[0.5em]
+Anmol Goel
+
+\cleardoublepage
+
+% === Certificate
+\phantomsection
+\chapter*{Certificate}
+\addcontentsline{toc}{chapter}{Certificate}
+
+It is certified that the work contained in this report titled ``COMPASS: Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling'' is the original work done by Anmol Goel and has been carried out under my supervision.
+
+\vspace{1.5cm}
+\noindent\textbf{Signed by:}\\[1.0cm]
+Prof.\ Ishaan Gupta\\
+Department of Biochemical Engineering and Biotechnology\\
+Indian Institute of Technology Delhi
+
+\vspace{0.8cm}
+\noindent\textbf{Date:} May 5, 2026
+
+\cleardoublepage
+
+% === Abstract
+\phantomsection
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+\noindent
+\textbf{COMPASS} (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) is a prior-aware \emph{sequential acquisition policy} motivated by a simple observation: related biomolecules often retain partial similarity in slow collective motion and in coarse organization of their configurational landscape, so a long molecular dynamics (MD) trajectory of a \emph{source} system can supply a structured atlas that suggests where a \emph{target} (for example, a mutant) is likely to place weight and which moves remain relevant.
+That atlas is not assumed exact---barriers and pathways can shift, routes can close, and target-specific channels can open---so acquisition must remain negotiable, combining prior-guided focus with explicit trust, novelty, and redundancy signals rather than treating any transferred map as ground truth.
+
+We instantiate COMPASS using transferred slow coordinates from a wild-type alanine peptide (A10) and evaluate choices on a cached mutant (A8Q2) library and in a matched Markov state model (MSM) emulator.
+Under retrospective replay (full-library oracle; evaluation labels withheld from the policy), transferred \emph{TICA} occupancy acts as a density-style prior and tends to be better aligned with faithful population-level steering at the budgets studied (for example short-budget helix-fraction accuracy and long-budget Jensen--Shannon divergence relative to bootstrap random), whereas one-dimensional \emph{SPIB} is better aligned with rapidly mapping distinct latent regions and source-supported coverage---objectives that need not coincide with low error on every post hoc observable.
+Prior-corruption controls show policies track their priors; under the MSM emulator, COMPASS isolates prior-shaped scoring from generic adaptivity and matches or improves observable errors relative to replica and count-based restarts, while farthest-point novelty can concentrate mass at the map periphery.
+
+The practical takeaway is objective-specific use of transferred latents together with explicit trust calibration before expensive online MD.
+
+\cleardoublepage
+
+\tableofcontents
+\cleardoublepage
+
+\phantomsection
+\addcontentsline{toc}{chapter}{List of Tables}
+\listoftables
+\cleardoublepage
+
+\phantomsection
+\addcontentsline{toc}{chapter}{List of Figures}
+\listoffigures
+\cleardoublepage
+
+% === List of Abbreviations (alphabetical by abbreviation; department sample)
+\phantomsection
+\chapter*{List of Abbreviations}
+\addcontentsline{toc}{chapter}{List of Abbreviations}
+
+\begin{tabular}{@{}p{0.22\textwidth}p{0.72\textwidth}@{}}
+COMPASS & Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling \\
+CV & Collective variable \\
+FES & Free energy surface \\
+JSD & Jensen--Shannon divergence \\
+MD & Molecular dynamics \\
+MSM & Markov state model \\
+NHB & Native hydrogen-bond count (evaluation feature in this work) \\
+SPIB & State predictive information bottleneck \\
+TICA & Time-lagged independent component analysis \\
+\end{tabular}
+
+\cleardoublepage
+
+\phantomsection
+\chapter*{\listequationname}
+\addcontentsline{toc}{chapter}{\listequationname}
+\listofeqloe
+\cleardoublepage
+
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% === Main matter (from manuscript, reshaped for BTP chapters)
+\input{COMPASS_BTP_CHAPTERS_SNIPPET.tex}
+
+% === Appendix: supporting material included in this PDF
+\appendix
+\setcounter{table}{0}
+\setcounter{figure}{0}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\phantomsection
+\part*{Supporting Information}
+\label{part:supporting}
+\addcontentsline{toc}{part}{Supporting Information}
+
+\input{latex_fragments/COMPASS_BTP_SI_BODY.tex}
+
+\cleardoublepage
+
+\phantomsection
+\chapter*{Acknowledgements}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+
+The authors thank colleagues and mentors for discussions on adaptive sampling and molecular simulation. A.G.\ designed the COMPASS framework, implemented the retrospective replay and MSM-emulator benchmark code, ran the experiments, performed the analyses, and drafted the manuscript. Prof.\ Ishaan Gupta provided guidance, reviewed outputs, and suggested direction. The authors thank the Department of Biochemical Engineering and Biotechnology for providing the necessary knowledge and opportunity to undertake this work.
+
+\cleardoublepage
+
+\bibliographystyle{unsrtnat}
+\bibliography{COMPASS_JCTC_REFERENCES}
+
+\end{document}

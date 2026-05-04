@@ -8,10 +8,10 @@ Protocol: _run_iteration1_seeds uses the same generator PDB and
 should be bitwise-identical on a fixed platform. If hashes differ, optional
 RMSD checks catch numerical drift or mixed-up files.
 
-Usage (after syncing ``outputs/seeding_a8q2/iter01/...``):
+Usage (after syncing ``archive/outputs_legacy/seeding_a8q2/iter01/...``):
 
   python scripts/validate_iter1_cross_strategy.py \\
-    --seeding-dir outputs/seeding_a8q2 \\
+    --seeding-dir archive/outputs_legacy/seeding_a8q2 \\
     --prefix A8Q2 \\
     --n-seeds 8
 """
@@ -71,7 +71,7 @@ def _max_aligned_rmsd_nm(ref, other, protein_atom_indices: np.ndarray) -> float:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo-root", type=Path, default=Path("."))
-    p.add_argument("--seeding-dir", type=Path, default=Path("outputs/seeding_a8q2"))
+    p.add_argument("--seeding-dir", type=Path, default=Path("archive/outputs_legacy/seeding_a8q2"))
     p.add_argument("--prefix", default="A8Q2")
     p.add_argument("--n-seeds", type=int, default=8)
     p.add_argument(

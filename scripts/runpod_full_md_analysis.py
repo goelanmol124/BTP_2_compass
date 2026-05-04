@@ -170,7 +170,7 @@ def main() -> None:
     p.add_argument("--repo-root", type=Path, default=Path.cwd())
     p.add_argument("--prefix", default="A8Q2")
     p.add_argument("--sim-dir", type=Path, default=Path("outputs/btp_equil/A8Q2"))
-    p.add_argument("--seeding-dir", type=Path, default=Path("outputs/seeding_a8q2"))
+    p.add_argument("--seeding-dir", type=Path, default=Path("archive/outputs_legacy/seeding_a8q2"))
     p.add_argument("--tica-dir", type=Path, default=Path("outputs/tica_artifacts_a10"))
     p.add_argument("--output-dir", type=Path, default=Path("outputs/full_md_analysis"))
     p.add_argument("--stride", type=int, default=1, help="Trajectory frame stride (1 = full frames).")

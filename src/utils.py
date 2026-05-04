@@ -146,7 +146,7 @@ def compute_density_kgm3(system: "openmm.System", state) -> float:
 def section(title: str) -> None:
     """Print a formatted section banner for long-running simulation logs.
 
-    Matches the visual style used in ``A10_Prod_Run.ipynb`` / ``A8Q2_Prod_Run.ipynb``
+    Matches the visual style used in the legacy MD notebooks (now ``src.simulate``).
     so console output stays readable during multi-hour GPU runs.
     """
     bar = "=" * 60

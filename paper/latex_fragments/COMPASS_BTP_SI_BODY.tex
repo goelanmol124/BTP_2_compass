@@ -1,0 +1,103 @@
+% Supporting Information body (from COMPASS_JCTC_SUPPORTING_INFORMATION.tex).
+% Included in ``paper/COMPASS_BTP_REPORT.tex`` after \appendix; table/figure numbering S-prefix set in main file.
+
+\chapter{Molecular dynamics protocol (source and target trajectories)}
+
+Production trajectories for the wild-type alanine-rich peptide A10 (Ace-(Ala)$_{10}$-NMe) and the mutant A8Q2 (Ace-(Ala)$_8$(Gln)$_2$-NMe) were generated with \textsc{OpenMM}~8.x.\cite{eastman2017openmm}
+We used the additive CHARMM36m protein force field with CHARMM-modified TIP3P water as distributed with \textsc{OpenMM} (\path{charmm36_2024.xml} and matching water parameters).\cite{huang2017charmm36m,kim2015charmmgui}
+Nonbonded interactions used a nominal 1.2~nm cutoff with smoothing from 1.0~nm, particle-mesh Ewald electrostatics, constraints on bonds to hydrogen, and rigid water.
+Integration used a Langevin middle integrator with 2~fs timestep and friction 1~ps$^{-1}$.
+Each system was energy-minimized, equilibrated (NVT with peptide heavy-atom restraints followed by NPT), and simulated in the NVT ensemble for production at \textbf{330~K} to accelerate helix--coil sampling relative to room temperature while preserving the qualitative physics relevant to this benchmark.
+The same protocol and temperature were used for A10 and A8Q2 so relative comparisons are internally consistent.
+
+Peptides were solvated in a periodic cubic box with roughly 1.2--1.5~nm buffer and 0.15~M NaCl (see project \path{docs/EXPERIMENT_PROTOCOL.md} for box and ion counts).
+Production coordinates were saved at \textbf{0.1~ns} (100~ps) spacing for downstream featurization, consistent with the chunk library described in the main text.
+The full A8Q2 trajectory was partitioned into non-overlapping chunks for COMPASS replay; reference observables $f_{\mathrm{helix}}^{\mathrm{ref}}$ and $f_{\mathrm{open}}^{\mathrm{ref}}$ were computed from the same full trajectory.
+
+\chapter{TICA and SPIB training details}
+
+TICA was fit on backbone $\phi/\psi$ (and related) torsional features from the A10 source trajectory using PyEMMA's symmetric time-lagged covariance estimator at a lag matched to the implementation used for production analysis (order 1--4~ns in frame units; see repository \path{src/} and phase-5 analysis logs).
+SPIB encoders were trained in PyTorch on the same A10 feature pipeline as in the main experiments, with latent dimension one or two and information-bottleneck trade-off as reported in the main text.
+
+\chapter{Replay implementation}
+
+Chunk scoring, deficit modes (raw vs.\ information-gain), two-phase schedules, prior corruption (uniform, shuffled, inverted, noisy), and bootstrap random baselines ($100$ repeats) were implemented in Python.
+Code paths: \path{src/compass/replay_enhanced.py} and \path{scripts/compass_experiments_enhanced.py}.
+Random seeds and experiment identifiers for each row of Table~\ref{tab:si_sweep} are recorded under \path{archive/outputs_legacy/compass_sweep2/sweep/}.
+
+\chapter{Complete sweep metrics}
+
+Table~\ref{tab:si_sweep} lists final metrics for every experiment in the enhanced sweep (\path{sweep2_results.csv}).
+Columns are: number of acquisition steps $N_{\mathrm{steps}}$, total acquired time $T$, TICA- or SPIB-space JSD for COMPASS vs.\ random mean, and helix-fraction error for COMPASS vs.\ random mean.
+
+\bgroup\scriptsize\setlength{\tabcolsep}{2.5pt}
+\input{latex_fragments/si_sweep_table}
+\egroup
+
+\chapter{Auxiliary experiments (referenced from the main text)}
+
+Stochastic top-$k$ (softmax) confirmation runs, pure-frontier and exploratory-static ablations, and additional chunk-size variants are included in Table~\ref{tab:si_sweep} (experiments \texttt{e11}--\texttt{e20}).
+Score-decomposition plots and per-step decision logs for each run are under \path{archive/outputs_legacy/compass_sweep2/} in the project tree.
+
+\chapter{Extended theory, schedule, and supplementary figures}
+
+\subsection*{TICA and SPIB constructions}
+
+Time-lagged independent component analysis seeks coordinates $\boldsymbol\chi(\mathbf{x})$ that maximize autocorrelation at lag $\tau$.\cite{perezhernandez2013tica,schwantes2013improvements}
+For mean-free featurized configurations $\mathbf{x}_t$, the instantaneous and symmetric time-lagged covariance matrices are
+\begin{equation}
+\begin{split}
+    \mathbf{C}(0) &= \mathbb{E}_t\!\left[\mathbf{x}_t \mathbf{x}_t^{\top}\right],\\
+    \mathbf{C}(\tau) &= \tfrac{1}{2}\mathbb{E}_t\!\left[\mathbf{x}_t \mathbf{x}_{t+\tau}^{\top} + \mathbf{x}_{t+\tau} \mathbf{x}_t^{\top}\right].
+\end{split}
+    \label{eq:si_tica_covariances}
+\end{equation}
+\addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}TICA instantaneous and time-lagged covariances}
+These define $\mathbf{C}(\tau)\mathbf{u}_i = \lambda_i \mathbf{C}(0)\mathbf{u}_i$, whose top eigenvectors yield the TICA basis used for $p_s(b)$.
+The SPIB objective used in training is
+\begin{equation}
+\begin{split}
+    \mathcal{L}_{\mathrm{SPIB}}(\phi,\theta) &=
+    \mathbb{E}_{q_\phi}\!\left[\log p_\theta(y_{t+\tau}\mid \mathbf{z}_t)\right]
+     - \beta\,D_{\mathrm{KL}}\!\left(q_\phi(\mathbf{z}\mid\mathbf{x})\,\Vert\,r(\mathbf{z})\right).
+\end{split}
+    \label{eq:si_spib_loss}
+\end{equation}
+\addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}SPIB variational training objective}
+
+\subsection*{Two-phase component weights}
+
+\begin{table}[htbp]
+    \centering
+    \caption{Weights $w_k(t)$ for the non-hybrid two-phase scheduler (identical to the schedule referenced in the main text). Exploratory, balanced, and exploit phases occupy 30\%, 40\%, and 30\% of the budget. Redundancy is negative (latent proximity penalty); a bin-fatigue prefactor $1/(1+n_b)$ scales the full combination in Eq.~(\ref{eq:score}).}
+    \label{tab:si_policy_weights}
+    \small
+    \setlength{\tabcolsep}{3.5pt}
+    \begin{tabular}{@{}lrrr@{}}
+        \toprule
+        Component $z_k$ & Expl. & Bal. & Exploit \\
+        \midrule
+        Source deficit ($d^{IG}_t$) & 0.15 & 1.25 & 1.45 \\
+        Source representative & 0.10 & 0.65 & 0.85 \\
+        Source-boundary trust & 1.20 & 0.25 & 0.15 \\
+        Frontier disagreement & 0.90 & 0.35 & 0.10 \\
+        Unvisited & 0.75 & 0.25 & 0.15 \\
+        Novelty & 0.65 & 0.25 & 0.10 \\
+        Redundancy & $-0.90$ & $-0.80$ & $-0.60$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{score_decomposition_e12.png}
+    \caption[Score decomposition (TICA2D two-phase, $80$\,ns)]{Score-component decomposition for the main TICA2D two-phase acquisition ($T_c=2$\,ns chunks, $80$\,ns budget). Each stacked bar shows weighted contributions for the selected chunk at that step; early steps are frontier-heavy, later steps are deficit-dominated.}
+    \label{fig:si_score_decomp}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.98\textwidth]{msm_final_budget_violins.png}
+    \caption[MSM emulator: final-round violin distributions]{MSM-emulator benchmark: repeat-level variability at the final simulated round (violins), for the same five presets and policies as the main-text convergence grid. Complements mean trajectories and pair-difference curves.}
+    \label{fig:si_msm_violins}
+\end{figure}

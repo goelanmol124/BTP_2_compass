@@ -1,4 +1,4 @@
-"""Run a sweep of COMPASS-Lite retrospective replay experiments.
+"""Run a sweep of COMPASS retrospective replay experiments.
 
 Each experiment is a small variation: variant, map kind, chunk size, total
 budget, or stochasticity.  All outputs are stored under
@@ -210,7 +210,7 @@ def plot_overlay(output_root: Path, sweep_dir: Path) -> None:
         ax.set_xlabel("sampled ns")
         ax.grid(alpha=0.25)
     axes[0].legend(frameon=False, fontsize=7, loc="upper right")
-    fig.suptitle("COMPASS-Lite sweep: all experiments vs random baseline")
+    fig.suptitle("COMPASS sweep: all experiments vs random baseline")
     sweep_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(sweep_dir / "sweep_overlay_curves.png", dpi=220)
     plt.close(fig)
@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> None:
     sweep_dir.mkdir(parents=True, exist_ok=True)
     table.to_csv(sweep_dir / "sweep_results.csv", index=False)
     with open(sweep_dir / "sweep_results.md", "w", encoding="utf-8") as f:
-        f.write("# COMPASS-Lite sweep results\n\n")
+        f.write("# COMPASS sweep results\n\n")
         if not table.empty:
             cols = [
                 "experiment",

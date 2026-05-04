@@ -178,6 +178,52 @@ def compute_backbone_rmsd(
     )
 
 
+def compute_backbone_rmsd_to_snapshot(
+    traj_protein: "md.Trajectory",
+    ref_snapshot: "md.Trajectory",
+) -> np.ndarray:
+    """Cα-only RMSD to a fixed reference structure (one frame), in nanometres.
+
+    Superposes each frame of ``traj_protein`` onto the Cα atoms of
+    ``ref_snapshot`` (must be a single frame, same topology as the trajectory)
+    and returns the MDTraj RMSD in nm. Does not mutate the input trajectories
+    (operates on a coordinate copy of ``traj_protein``).
+
+    Use a **coil** or **extended** reference snapshot to measure distance from
+    a disordered geometry; this is independent of
+    :func:`compute_backbone_rmsd_to_ideal_helix`, which measures distance from
+    an idealised helix.
+    """
+    import mdtraj as md
+
+    if ref_snapshot.n_frames != 1:
+        raise ValueError("ref_snapshot must contain exactly one frame")
+    top_t, top_r = traj_protein.topology, ref_snapshot.topology
+    if top_t.n_residues != top_r.n_residues:
+        raise ValueError(
+            f"Residue count mismatch: trajectory {top_t.n_residues} vs ref {top_r.n_residues}."
+        )
+    ca_t = top_t.select("name CA")
+    ca_r = top_r.select("name CA")
+    if len(ca_t) != len(ca_r):
+        raise ValueError("Cα count mismatch between trajectory and reference snapshot")
+
+    ref = ref_snapshot[0:1]
+    xyz = np.array(traj_protein.xyz, dtype=np.float64, order="C", copy=True)
+    work = md.Trajectory(xyz=xyz, topology=traj_protein.topology)
+    work.superpose(ref, frame=0, atom_indices=ca_t, ref_atom_indices=ca_r)
+
+    return md.rmsd(
+        work,
+        ref,
+        frame=0,
+        atom_indices=ca_t,
+        ref_atom_indices=ca_r,
+        precentered=True,
+        superpose=False,
+    )
+
+
 def load_helix_reference_traj(helix_ref_pdb: str) -> "md.Trajectory":
     """Load in-vacuo ideal-helix PDB and slice to the same protein selection as production.
 

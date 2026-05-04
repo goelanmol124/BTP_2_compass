@@ -4,7 +4,7 @@
   - 500 ns pooled ground truth (helix + extended replicas)
   - each adaptive-seeding strategy (random, native, transferred), all seeds pooled
 
-Designed for RunPod / machines that have ``outputs/seeding_a8q2/**/*.dcd`` and
+Designed for machines that have ``archive/outputs_legacy/seeding_a8q2/**/*.dcd`` and
 equilibrium tops/DCDs under ``outputs/btp_equil/A8Q2/``.
 """
 
@@ -139,8 +139,8 @@ def main() -> None:
     p.add_argument("--repo-root", type=Path, default=Path.cwd())
     p.add_argument("--prefix", default="A8Q2")
     p.add_argument("--sim-dir", type=Path, default=Path("outputs/btp_equil/A8Q2"))
-    p.add_argument("--seeding-dir", type=Path, default=Path("outputs/seeding_a8q2"))
-    p.add_argument("--output-dir", type=Path, default=Path("outputs/fes_three_strategies"))
+    p.add_argument("--seeding-dir", type=Path, default=Path("archive/outputs_legacy/seeding_a8q2"))
+    p.add_argument("--output-dir", type=Path, default=Path("archive/outputs_legacy/fes_three_strategies"))
     p.add_argument("--max-iteration", type=int, default=N_ITERATIONS)
     p.add_argument("--stride", type=int, default=1)
     args = p.parse_args()

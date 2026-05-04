@@ -1,3 +1,6 @@
+﻿<!-- Verify CSV paths under `outputs/` before citing numbers. Legacy sweep trees were moved to `archive/outputs_legacy/`. Current pipeline overview: `docs/CURRENT_PIPELINE.md`. -->
+
+
 # Experimental Findings: Adaptive Seeding and TICA Transferability for Helix–Coil Transitions
 
 **System:** Ac-Ala₁₀-NHMe (A10) and Ac-Ala₈Gln₂-NHMe (A8Q2), explicit solvent, OpenMM/CHARMM36m, Langevin dynamics at 300 K.
@@ -251,3 +254,59 @@ Justifies the use of a single CV (TIC-1) for adaptive seeding. If A8Q2 also show
 | 5 | TICA transfer fails 3/4 geometric tests but retains |r| = 0.79 with helix content | Strong | AUC = 5.61 (transferred) vs 10.89 (native) |
 | 6 | Native seeding maximises transitions (0.26/ns) but minimises coverage (0.921) | Strong | Transition rate 1.7× higher, JSD 3.4× worse |
 | 7 | Single dominant slow mode in A10 (spectral gap 1.8:1 at lag=10 ns) | Moderate | cos(TIC-1, lag1 vs lag10) = 0.88 |
+
+---
+
+## 8. COMPASS-Lite replay: oracle baseline caveat
+
+**Claim.** Any narrative or table that reports COMPASS beating “random” using the enhanced replay sweep (`scripts/compass_experiments_enhanced.py` / `outputs/compass_sweep2/`) must state explicitly that **both** policies drew candidate chunks from the **full** cached A8Q2 trajectory—an oracle shared action set.
+
+**Implication.** Those margins are **not** valid as-is for “online adaptive MD on a fresh mutant,” where only **already-simulated** frames may be re-seeded. The corrected offline protocol is **online-faithful replay** (`src/compass/replay_online.py`, `scripts/compass_experiments_online.py`): observed-seed pools, optional deterministic-trajectory diagnostics, and a segment-aware MSM stochastic emulator for primary offline validation.
+
+**Strength.** Procedural (definition of the baseline), not a new MD measurement.
+
+**Impact.** Headline COMPASS-vs-random numbers from the oracle sweep should be relabeled as retrospective-oracle diagnostics until replaced by online-faithful sweep outputs.
+
+---
+
+## 9. MSM six-baseline benchmark (segment-aware emulator)
+
+**Claim.** Under the **same** MSM transition matrix, lag, atlas bins, and lag-weighted **sampled_ns** budget, **B6 (COMPASS-full)** is compared to **B0** (single long walk sliced per step), **B1** (independent replicas round-robin from initial seeds), **B2** (uniform adaptive restarts over observed microstates), **B3** (min-count adaptive), and **B4** (farthest-point adaptive). This isolates **prior value** (B6 vs B3), **generic adaptivity** (B3 vs B1), and a **Markov ceiling** (B0 mixes fast on a model fit to the full trajectory—see caveats below).
+
+**Artifacts (50 repeats × 5 presets × default six policies, 2026-05-02 run).**
+
+- Runner: [`scripts/compare_msm_three_policies.py`](scripts/compare_msm_three_policies.py) — `--output-dir outputs/msm_benchmark` (optional `--with-b5`, `--save-hists`).
+- Long-form per-step table: `outputs/msm_benchmark/per_step_all.parquet` (or `.csv` if parquet unavailable).
+- Final-step summary: `outputs/msm_benchmark/benchmark_final_step_summary.csv`, `outputs/msm_benchmark/three_policy_summary.csv`.
+- References (GT hist, noise floor bootstrap): `outputs/msm_benchmark/references/<preset>/references.{json,npz}`.
+- Figures: `outputs/msm_benchmark/figures/fig1_convergence_grid.png` … `fig6_pair_delta_curves.png` (from [`scripts/plot_msm_benchmark.py`](scripts/plot_msm_benchmark.py)).
+
+**Representative final-ns means (SPIB1D preset, 160 ns).**
+
+| Policy | JSD | \|Δf_helix\| | \|Δf_open\| |
+|--------|-----|-------------|------------|
+| B0 | 0.063 | 0.025 | 0.031 |
+| B1 | 0.320 | 0.053 | 0.088 |
+| B2 | 0.117 | 0.084 | 0.106 |
+| B3 | 0.213 | 0.215 | 0.264 |
+| B4 | 0.319 | 0.247 | 0.286 |
+| B6 | **0.077** | **0.037** | **0.045** |
+
+**Representative final-ns means (TICA2D 200-step / 400 ns preset).**
+
+| Policy | JSD | \|Δf_helix\| |
+|--------|-----|-------------|
+| B0 | **0.334** | 0.024 |
+| B1 | 0.555 | 0.045 |
+| B6 | **0.316** | **0.019** |
+
+**Caveats.**
+
+- MSM mixing is optimistic relative to real MD restart cost; B0 is a **diagnostic ceiling**, not a fair “one long GPU run” competitor when slow modes are under-resolved in 2D bins.
+- `sampled_ns` is lag-weighted histogram mass × 0.1 ns/frame spacing, not wall-clock.
+- B4 (pure geometry) can severely underperform on TICA2D maps when “farthest” bins are empty for helix/open observables.
+
+**Strength.** Moderate: many repeats and aligned budgets; conclusions are **emulator-level**, not new production MD.
+
+**Impact.** Supports the decomposition “prior + structured score” vs **count-based** and **uniform** adaptive restarts under online-faithful Markov assumptions; pair-difference plots (**fig6**) highlight B6−B3 (prior) vs B3−B1 (adaptivity).
+

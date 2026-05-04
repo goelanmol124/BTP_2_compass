@@ -20,7 +20,7 @@ from src.adaptive_seeding import (  # noqa: E402
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo-root", type=Path, default=REPO)
-    p.add_argument("--seeding-dir", type=Path, default=Path("outputs/seeding_a8q2"))
+    p.add_argument("--seeding-dir", type=Path, default=Path("archive/outputs_legacy/seeding_a8q2"))
     p.add_argument("--prod-top", type=Path, default=Path("outputs/btp_equil/A8Q2/A8Q2_extended_prod_top.pdb"))
     p.add_argument("--generator-pdb", type=Path, default=Path("outputs/btp_equil/A8Q2/A8Q2_extended_npt_final.pdb"))
     p.add_argument("--n-seeds", type=int, default=6)

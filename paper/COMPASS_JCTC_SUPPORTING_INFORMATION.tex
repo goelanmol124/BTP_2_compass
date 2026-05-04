@@ -1,0 +1,72 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{caption}
+\usepackage{graphicx}
+\usepackage[babel=false]{microtype}
+\usepackage{xurl}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\hbadness=10000
+\vbadness=10000
+
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+
+\title{Supporting Information\\[0.5em]\large COMPASS: Retrospective Benchmarking of Transferred Slow-Coordinate Priors (BTP report)}
+\author{Anmol Goel and Ishaan Gupta\\Department of Biochemical Engineering and Biotechnology\\Indian Institute of Technology Delhi}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Molecular dynamics protocol (source and target trajectories)}
+
+Production trajectories for the wild-type alanine-rich peptide A10 (Ace-(Ala)$_{10}$-NMe) and the mutant A8Q2 (Ace-(Ala)$_8$(Gln)$_2$-NMe) were generated with \textsc{OpenMM}~8.x.\cite{eastman2017openmm}
+We used the additive CHARMM36m protein force field with CHARMM-modified TIP3P water as distributed with \textsc{OpenMM} (\path{charmm36_2024.xml} and matching water parameters).\cite{huang2017charmm36m,kim2015charmmgui}
+Nonbonded interactions used a nominal 1.2~nm cutoff with smoothing from 1.0~nm, particle-mesh Ewald electrostatics, constraints on bonds to hydrogen, and rigid water.
+Integration used a Langevin middle integrator with 2~fs timestep and friction 1~ps$^{-1}$.
+Each system was energy-minimized, equilibrated (NVT with peptide heavy-atom restraints followed by NPT), and simulated in the NVT ensemble for production at \textbf{330~K} to accelerate helix--coil sampling relative to room temperature while preserving the qualitative physics relevant to this benchmark.
+The same protocol and temperature were used for A10 and A8Q2 so relative comparisons are internally consistent.
+
+Peptides were solvated in a periodic cubic box with roughly 1.2--1.5~nm buffer and 0.15~M NaCl (see project \path{docs/EXPERIMENT_PROTOCOL.md} for box and ion counts).
+Production coordinates were saved at \textbf{0.1~ns} (100~ps) spacing for downstream featurization, consistent with the chunk library described in the main text.
+The full A8Q2 trajectory was partitioned into non-overlapping chunks for COMPASS replay; reference observables $f_{\mathrm{helix}}^{\mathrm{ref}}$ and $f_{\mathrm{open}}^{\mathrm{ref}}$ were computed from the same full trajectory.
+
+\section{TICA and SPIB training details}
+
+TICA was fit on backbone $\phi/\psi$ (and related) torsional features from the A10 source trajectory using PyEMMA's symmetric time-lagged covariance estimator at a lag matched to the implementation used for production analysis (order 1--4~ns in frame units; see repository \path{src/} and phase-5 analysis logs).
+SPIB encoders were trained in PyTorch on the same A10 feature pipeline as in the main experiments, with latent dimension one or two and information-bottleneck trade-off as reported in the main text.
+
+\section{Replay implementation}
+
+Chunk scoring, deficit modes (raw vs.\ information-gain), two-phase schedules, prior corruption (uniform, shuffled, inverted, noisy), and bootstrap random baselines ($100$ repeats) were implemented in Python.
+Code paths: \path{src/compass/replay_enhanced.py} and \path{scripts/compass_experiments_enhanced.py}.
+Random seeds and experiment identifiers for each row of Table~\ref{tab:si_sweep} are recorded under \path{archive/outputs_legacy/compass_sweep2/sweep/}.
+
+\section{Complete sweep metrics}
+
+Table~\ref{tab:si_sweep} lists final metrics for every experiment in the enhanced sweep (\path{sweep2_results.csv}).
+Columns are: number of acquisition steps $N_{\mathrm{steps}}$, total acquired time $T$, TICA- or SPIB-space JSD for COMPASS vs.\ random mean, and helix-fraction error for COMPASS vs.\ random mean.
+
+\bgroup\scriptsize\setlength{\tabcolsep}{2.5pt}
+\input{latex_fragments/si_sweep_table}
+\egroup
+
+\section{Auxiliary experiments (referenced from the main text)}
+
+Stochastic top-$k$ (softmax) confirmation runs, pure-frontier and exploratory-static ablations, and additional chunk-size variants are included in Table~\ref{tab:si_sweep} (experiments \texttt{e11}--\texttt{e20}).
+Score-decomposition plots and per-step decision logs for each run are under \path{archive/outputs_legacy/compass_sweep2/} in the project tree.
+
+\bibliographystyle{unsrt}
+\bibliography{COMPASS_JCTC_REFERENCES}
+
+\end{document}

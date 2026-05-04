@@ -1,7 +1,8 @@
 """
 Analyze trained A10 SPIB states against helix/open conformational metrics.
 
-Outputs, by default, to ``outputs/spib_a10_analysis``:
+Loads the trained model from ``archive/outputs_legacy/spib_a10_model`` by default and
+writes fresh analysis to ``outputs/spib_a10_analysis``:
   - spib_a10_latent_conformation.png
   - spib_a10_state_summary.csv
   - spib_a10_summary.json
@@ -47,7 +48,7 @@ A10_TRAJS = (
 )
 HELIX_REF = A10_DIR / "A10_helix.pdb"
 
-DEFAULT_MODEL_DIR = _ROOT / "outputs" / "spib_a10_model"
+DEFAULT_MODEL_DIR = _ROOT / "archive" / "outputs_legacy" / "spib_a10_model"
 DEFAULT_OUTPUT_DIR = _ROOT / "outputs" / "spib_a10_analysis"
 
 DEFAULT_SPIB_Z_DIM = 1

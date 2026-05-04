@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pod 2 post-production orchestrator (RunPod / Linux; see EXPERIMENT_PROTOCOL §7–8, §11, §13.4).
+Pod 2 post-production orchestrator (RunPod / Linux; see docs/EXPERIMENT_PROTOCOL.md §7–8, §11, §13.4).
 
 Waits until A8Q2 Phase-4 production (both extended and helix replicas) has **finished
 successfully**, then runs, in order:

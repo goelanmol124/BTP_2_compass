@@ -169,7 +169,7 @@ def main() -> None:
     p.add_argument(
         "--seeding-dir",
         type=Path,
-        default=Path("outputs/seeding_a8q2"),
+        default=Path("archive/outputs_legacy/seeding_a8q2"),
         help="Adaptive seeding output directory (contains iter01/, iter02/, ...).",
     )
     p.add_argument(
