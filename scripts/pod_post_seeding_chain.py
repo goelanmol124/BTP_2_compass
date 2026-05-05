@@ -5,7 +5,7 @@ Post–Phase-8 automation for a single RunPod (or any Linux host).
 Typical use after starting the first adaptive seeding run **without** TICA artifacts::
 
     nohup .venv-openmm/bin/python -u scripts/pod_post_seeding_chain.py \\
-        --repo-root /workspace/BTP_2_Calm \\
+        --repo-root /workspace/btp_2_compass \\
         --wait-for-json outputs/seeding_a8q2/adaptive_seeding_results.json \\
         >> post_chain.log 2>&1 &
 

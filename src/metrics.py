@@ -1,5 +1,5 @@
 """
-metrics.py — Acceleration metrics and final analysis for the BTP_2_Calm experiment.
+metrics.py — Acceleration metrics and final analysis for the btp_2_compass experiment.
 
 This module quantifies how effectively each adaptive seeding strategy (Random,
 Transferred TICA, Native TICA) converges the A8Q2 free energy surface relative
@@ -818,6 +818,122 @@ def plot_transferability_scores(
     plt.close(fig)
 
 
+def plot_transfer_fes_1d(
+    tic1_a8q2: np.ndarray,
+    nhb_a8q2: np.ndarray,
+    output_path: Path,
+    tic1_a10: np.ndarray | None = None,
+    nhb_a10: np.ndarray | None = None,
+    helix_nhb_threshold: int = 3,
+    n_bins: int = 50,
+    kT_kcal: float = 0.656,
+    # Legacy kwargs silently accepted so old call-sites don't break
+    **_kwargs,
+) -> None:
+    """Two-panel 1D FES comparison: A10 (left) and A8Q2 (right).
+
+    Each curve is continuously colored by the local helix fraction in each bin
+    (orange/warm = helix-rich, blue/cool = coil-rich), replacing the previous
+    arbitrary half-space shading and boundary line.
+
+    Parameters
+    ----------
+    tic1_a8q2  : (n_frames,) transferred TIC-1 values on A8Q2
+    nhb_a8q2   : (n_frames,) H-bond counts for A8Q2
+    output_path: path to save figure
+    tic1_a10   : (n_frames,) native A10 TIC-1 (left panel); if None, only one panel
+    nhb_a10    : (n_frames,) H-bond counts for A10
+    """
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import Normalize
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmap = plt.get_cmap("RdBu_r")  # blue=coil (low f_helix), red=helix (high f_helix)
+    norm = Normalize(vmin=0.0, vmax=1.0)
+
+    def _fes_colored(tic1: np.ndarray, nhb: np.ndarray, ax: "plt.Axes", n: int = n_bins) -> None:
+        """Plot FES as a LineCollection colored by per-bin helix fraction."""
+        counts, edges = np.histogram(tic1, bins=n)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        prob = counts.astype(float) / counts.sum()
+        with np.errstate(divide="ignore"):
+            fes = -kT_kcal * np.log(np.where(prob > 0, prob, np.nan))
+        fes -= np.nanmin(fes)
+
+        # Per-bin helix fraction
+        is_helix = nhb >= helix_nhb_threshold
+        f_helix_bin = np.array([
+            float(is_helix[(tic1 >= edges[i]) & (tic1 < edges[i + 1])].mean())
+            if np.any((tic1 >= edges[i]) & (tic1 < edges[i + 1]))
+            else 0.0
+            for i in range(n)
+        ])
+
+        # Build LineCollection: one segment per adjacent pair of valid points
+        valid = ~np.isnan(fes)
+        xs = centers[valid]
+        ys = fes[valid]
+        fh = f_helix_bin[valid]
+
+        if len(xs) < 2:
+            ax.plot(xs, ys, color="gray", lw=2)
+            return
+
+        pts = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+        segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+        seg_fh = 0.5 * (fh[:-1] + fh[1:])  # midpoint color for each segment
+
+        lc = LineCollection(segs, cmap=cmap, norm=norm, linewidth=3, zorder=3)
+        lc.set_array(seg_fh)
+        ax.add_collection(lc)
+        ax.set_xlim(xs.min() - 0.05 * (xs.max() - xs.min()),
+                    xs.max() + 0.05 * (xs.max() - xs.min()))
+        ax.set_ylim(-0.1, np.nanmax(ys) * 1.12)
+
+        # Annotate helix/coil wells
+        helix_center = float(xs[fh == fh.max()][0]) if fh.max() > 0 else xs[0]
+        coil_center = float(xs[fh == fh.min()][-1]) if fh.min() < 1 else xs[-1]
+        ymax = float(np.nanmax(ys))
+        ax.text(helix_center, ymax * 0.97, "Helix", ha="center", va="top",
+                fontsize=8.5, color=cmap(0.95), fontweight="bold")
+        ax.text(coil_center, ymax * 0.97, "Coil", ha="center", va="top",
+                fontsize=8.5, color=cmap(0.05), fontweight="bold")
+        return lc
+
+    has_a10 = tic1_a10 is not None and nhb_a10 is not None
+    ncols = 2 if has_a10 else 1
+    fig, axes = plt.subplots(1, ncols, figsize=(5.5 * ncols, 4.2), sharey=False,
+                             constrained_layout=True)
+    if ncols == 1:
+        axes = [axes]
+
+    if has_a10:
+        _fes_colored(tic1_a10.ravel(), nhb_a10, axes[0])
+        axes[0].set_xlabel("TIC-1 (A10 native)")
+        axes[0].set_ylabel("Free Energy (kcal/mol)")
+        axes[0].set_title("A10 (Ac-Ala$_{10}$-NHMe)")
+
+    _fes_colored(tic1_a8q2.ravel(), nhb_a8q2, axes[-1])
+    axes[-1].set_xlabel("TIC-1 (transferred A10→A8Q2)")
+    if not has_a10:
+        axes[-1].set_ylabel("Free Energy (kcal/mol)")
+    axes[-1].set_title("A8Q2 (Ac-Ala$_8$Gln$_2$-NHMe)")
+
+    # Shared colorbar on the right
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes.tolist() if ncols > 1 else axes[0],
+                        fraction=0.025, pad=0.02, aspect=20)
+    cbar.set_label("Local helix fraction $f_\\mathrm{helix}$", fontsize=9)
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+
+    fig.suptitle("1D Free Energy Profile: Helix/Coil Content Along TIC-1", fontsize=11)
+    fig.savefig(output_path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: ENTROPY AND F_HELIX CURVE PLOTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -986,9 +1102,9 @@ def generate_final_figures(results_dir: Path, output_dir: Path) -> None:
     # ── Figure 5: Transferability scores ──────────────────────────────────
     if ts_data:
         plot_transferability_scores(
-            d0=float(ts_data.get("d0", np.nan)),
-            d_tau=float(ts_data.get("d_tau", np.nan)),
-            d_km=float(ts_data.get("d_km", np.nan)),
+            d0=float(ts_data.get("D0", ts_data.get("d0", np.nan))),
+            d_tau=float(ts_data.get("D_tau", ts_data.get("d_tau", np.nan))),
+            d_km=float(ts_data.get("D_KM", ts_data.get("d_km", np.nan))),
             pearson_r=float(ts_data.get("pearson_r", np.nan)),
             output_path=output_dir / "fig_transferability_scores.png",
         )

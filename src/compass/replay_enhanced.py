@@ -1100,7 +1100,7 @@ def plot_component_decomposition(decisions: pd.DataFrame, output_dir: Path, max_
     neg = np.zeros(len(sub))
     n_off = len(positive_cols)
     for j, col in enumerate([c for c in weighted_cols if sub[c].min() < 0]):
-        vals = sub[c].clip(upper=0).to_numpy()
+        vals = sub[col].clip(upper=0).to_numpy()
         ax.bar(
             x,
             vals,

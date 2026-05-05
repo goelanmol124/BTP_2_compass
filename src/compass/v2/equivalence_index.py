@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 
+from src.analysis import BURNIN_FRAMES
 from src.compass.replay_enhanced import project_tica
 from src.compass.v2.equivalence import EquivalenceMethod
 
@@ -93,6 +94,28 @@ def _pca_features_2d(feats: np.ndarray) -> np.ndarray:
     return PCA(n_components=2, random_state=0).fit_transform(np.asarray(feats, dtype=np.float64))
 
 
+def _load_nhb(repo_root: Path) -> np.ndarray:
+    p = repo_root / "outputs" / "artifacts" / "a8q2_nhb.npy"
+    if not p.is_file():
+        raise FileNotFoundError(p)
+    return np.load(p).astype(np.float64)
+
+
+def _nhb_torsion_features(feats: np.ndarray, nhb: np.ndarray, nhb_weight: float = 0.5) -> np.ndarray:
+    """Combine normalized NHB and torsion features with given weight split."""
+    from sklearn.preprocessing import StandardScaler
+
+    torsion_scaled = StandardScaler().fit_transform(feats)
+    nhb_col = nhb.reshape(-1, 1)
+    nhb_range = float(nhb_col.max() - nhb_col.min())
+    nhb_norm = (nhb_col - nhb_col.min()) / max(nhb_range, 1e-6)
+    # Weight nhb_weight fraction to NHB, remainder to torsion (split by column count)
+    n_torsion = torsion_scaled.shape[1]
+    torsion_part = torsion_scaled * np.sqrt((1.0 - nhb_weight) / n_torsion)
+    nhb_part = nhb_norm * np.sqrt(nhb_weight)
+    return np.hstack([torsion_part, nhb_part])
+
+
 def build_method_matrix(
     repo_root: Path,
     method: EquivalenceMethod,
@@ -113,6 +136,10 @@ def build_method_matrix(
     if method == EquivalenceMethod.M7_MACRO_KMEANS:
         z = _pca_features_2d(feats)
         return z.astype(np.float64), f"kmeans_projection_nc{n_clusters}"
+    if method == EquivalenceMethod.M9_NHB_TORSION:
+        nhb = _load_nhb(repo_root)
+        X = _nhb_torsion_features(feats, nhb, nhb_weight=0.5)
+        return X, "nhb_torsion_hybrid_50_50_weight"
     raise ValueError(f"Unknown method matrix for {method}")
 
 

@@ -17,6 +17,8 @@ class EquivalenceMethod(str, Enum):
     M5_TICA_TARGET = "M5"
     M7_MACRO_KMEANS = "M7"
     M8_HYBRID_M1_M3 = "M8"
+    # NHB + torsion hybrid: physically motivated for helix-coil (hydrogen bonds + backbone geometry)
+    M9_NHB_TORSION = "M9"
 
 
 def segment_id(segments: TrajectorySegments, frame: int) -> int | None:

@@ -1067,8 +1067,8 @@ Run once on each fresh pod before any Python script:
 #!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y -qq git
-git clone https://github.com/yourrepo/BTP_2_Calm.git
-cd BTP_2_Calm
+git clone https://github.com/yourrepo/btp_2_compass.git
+cd btp_2_compass
 pip install "openmm[cuda12]" mdtraj numpy scipy \
     deeptime pymongo matplotlib pandas PeptideBuilder biopython pdbfixer \
     MDAnalysis
@@ -1120,12 +1120,12 @@ python src/train_tica.py                      # ~20 min: lag scan + TICA + trans
 
 ```bash
 # Optional: ensure repo is a git clone so pull works; copied trees have no .git
-cd /workspace/BTP_2_Calm && git pull --ff-only
+cd /workspace/btp_2_compass && git pull --ff-only
 
 # While simulate is still running OR after it exits — waits for complete logs + DCDs, then continues
 nohup python -u scripts/pod2_orchestrate.py \
-  --repo-root /workspace/BTP_2_Calm \
-  --sim-output-dir /workspace/BTP_2_Calm/outputs/btp_equil/A8Q2 \
+  --repo-root /workspace/btp_2_compass \
+  --sim-output-dir /workspace/btp_2_compass/outputs/btp_equil/A8Q2 \
   --tica-artifacts-dir /path/to/dir/with/a10_tica_singular_vectors_left.npy \
   > pod2_orchestrate.log 2>&1 &
 ```

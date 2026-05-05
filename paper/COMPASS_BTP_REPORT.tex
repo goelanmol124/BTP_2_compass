@@ -74,7 +74,7 @@
 \vspace{1cm}
 {\normalsize May 5, 2026\par}
 \vspace{0.6cm}
-{\small Code repository: \url{https://github.com/goelanmol124/BTP_2_Experiment}\par}
+{\small Code repository: \url{https://github.com/goelanmol124/btp_2_compass}\par}
 \vspace*{1.2cm}
 \end{titlepage}
 
@@ -134,7 +134,7 @@ retrospective chunk-replay sampling of the mutant A8Q2.
 Observable estimation uses reference-reweighted importance sampling (a WHAM-equivalent bias correction) to account for the non-uniform restart density introduced by any adaptive policy.
 We benchmark five policies ordered by sophistication: single walk (P1), independent replicas (P2), uniform random (P3), count-based adaptive (P4), and full COMPASS (P5), across ablations of chunk size (0.2--20~ns), latent CV type (TICA-1D/2D, SPIB-1D/2D), and prior-noise level (clean to uniform), each with 20 independent repeats for statistical power.
 
-COMPASS achieves lower helix-fraction error at fixed budget and higher target coverage than all uninformed baselines.
+COMPASS achieves lower helix-fraction error and higher target coverage than the non-adaptive baselines (P2--P3) across the budgets emphasized here, and reaches the fixed helix-fraction error threshold faster than count-based adaptive sampling (P4); at very long budgets, reweighted helix error can favor P4 once both policies have saturated coverage.
 The 2D latent space provides more directional guidance than 1D for the COMPASS prior, while TICA remains better calibrated as a density estimator than SPIB.
 Source-space coverage reliably predicts target-space coverage, offering a practical online proxy for convergence monitoring without access to ground-truth observables.
 These results confirm that prior-informed seed selection confers measurable advantage and that the advantage is robust to moderate prior corruption, with degradation scaling proportionally to the fraction of source information destroyed.
@@ -206,7 +206,7 @@ TICA & Time-lagged independent component analysis \\
 \chapter*{Acknowledgements}
 \addcontentsline{toc}{chapter}{Acknowledgements}
 
-The authors thank colleagues and mentors for discussions on adaptive sampling and molecular simulation. A.G.\ designed the COMPASS framework, implemented the retrospective replay and matched-dynamics comparison code, ran the experiments, performed the analyses, and drafted the manuscript. Prof.\ Ishaan Gupta provided guidance, reviewed outputs, and suggested direction. The authors thank the Department of Biochemical Engineering and Biotechnology for providing the necessary knowledge and opportunity to undertake this work.
+I thank colleagues and mentors for discussions on adaptive sampling and molecular simulation. I designed the COMPASS framework, implemented the retrospective replay and matched-dynamics comparison code, ran the experiments, performed the analyses, and drafted this report. Prof.\ Ishaan Gupta provided guidance, reviewed outputs, and suggested direction. I thank the Department of Biochemical Engineering and Biotechnology for providing the necessary knowledge and opportunity to undertake this work.
 
 \cleardoublepage
 

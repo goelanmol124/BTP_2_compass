@@ -136,7 +136,7 @@ def main() -> int:
     p.add_argument("--ssh-host", default="203.57.40.227")
     p.add_argument("--ssh-port", type=int, default=10148)
     p.add_argument("--ssh-key", type=Path, default=Path.home() / ".ssh" / "id_ed25519")
-    p.add_argument("--remote-repo", default="/workspace/BTP_2_Calm")
+    p.add_argument("--remote-repo", default="/workspace/btp_2_compass")
     p.add_argument("--dry-run", action="store_true", help="Only print what would be fetched.")
     p.add_argument("--parallel", type=int, default=1, help="Concurrent scp processes (1–3 recommended).")
     p.add_argument("--max-retries", type=int, default=3)

@@ -16,7 +16,7 @@
 
 .EXAMPLE
   .\scripts\sync_runpod_outputs.ps1 -SshHost 203.57.40.227 -Port 10148 `
-    -KeyFile "$env:USERPROFILE\.ssh\id_ed25519" -RepoRoot "C:\Users\you\Projects\BTP\BTP_2_Calm"
+    -KeyFile "$env:USERPROFILE\.ssh\id_ed25519" -RepoRoot "C:\Users\you\Projects\BTP\btp_2_compass"
 #>
 [CmdletBinding()]
 param(

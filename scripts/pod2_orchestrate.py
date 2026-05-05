@@ -18,8 +18,8 @@ show completion (guards against a crashed process leaving partial logs).
 Usage (on the pod, from repo root)::
 
     nohup python -u scripts/pod2_orchestrate.py \\
-        --repo-root /workspace/BTP_2_Calm \\
-        --sim-output-dir /workspace/BTP_2_Calm/outputs/btp_equil/A8Q2 \\
+        --repo-root /workspace/btp_2_compass \\
+        --sim-output-dir /workspace/btp_2_compass/outputs/btp_equil/A8Q2 \\
         > orchestrate.log 2>&1 &
 
 Optional: ``--tica-artifacts-dir`` pointing to a folder with
@@ -425,7 +425,7 @@ def main() -> None:
         "--repo-root",
         type=Path,
         default=Path(__file__).resolve().parent.parent,
-        help="BTP_2_Calm repository root (default: parent of scripts/).",
+        help="btp_2_compass repository root (default: parent of scripts/).",
     )
     parser.add_argument(
         "--sim-output-dir",

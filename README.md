@@ -1,4 +1,4 @@
-# BTP_2_Calm — COMPASS peptide MD / adaptive sampling
+# btp_2_compass — COMPASS peptide MD / adaptive sampling
 
 BTP / thesis-scale project: **COMPASS** (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) for A10→A8Q2 peptide benchmarks, OpenMM/CHARMM36m, retrospective replay, MSM-style diagnostics, and **COMPASS v2** causal replay.
 

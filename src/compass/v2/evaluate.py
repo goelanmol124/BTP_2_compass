@@ -76,6 +76,65 @@ def cheating_audit_ok(policy_inputs: dict[str, Any], forbidden_keys: set[str]) -
     return len(keys & forbidden_keys) == 0
 
 
+def reweighted_observable(
+    observed_frames: np.ndarray,
+    bin_assignments: np.ndarray,
+    pi_ref_bins: np.ndarray,
+    f_obs_per_bin: np.ndarray,
+    n_total_bins: int | None = None,
+) -> float:
+    """Reference-reweighted importance sampling estimate of a per-frame observable.
+
+    Corrects for adaptive sampling restart bias. Equivalent to WHAM/MBAR with zero
+    bias potential: each observed chunk is unbiased MD, but restart over-represents
+    some regions. We reweight using the known reference equilibrium distribution.
+
+    Args:
+        observed_frames: indices of observed frames (subset of archive).
+        bin_assignments: integer bin index for every frame in the archive (shape [n_archive]).
+        pi_ref_bins: equilibrium bin weights from reference long MD (shape [n_bins]).
+        f_obs_per_bin: observable value per bin from reference (shape [n_bins]).
+        n_total_bins: if given, used as denominator floor.
+
+    Returns:
+        Reweighted scalar estimate of the observable.
+    """
+    observed_frames = np.asarray(observed_frames, dtype=int)
+    if observed_frames.size == 0:
+        return float(np.sum(pi_ref_bins * f_obs_per_bin))
+
+    obs_bins = bin_assignments[observed_frames]
+    n_bins = len(pi_ref_bins)
+    counts = np.bincount(obs_bins, minlength=n_bins).astype(float)
+    n_obs = float(observed_frames.size)
+    pi_sample = counts / max(n_obs, 1.0)
+
+    # Importance weight: target / proposal; floor prevents zero-division
+    floor = 1.0 / max(n_obs, float(n_total_bins or n_bins))
+    w = pi_ref_bins / np.maximum(pi_sample, floor)
+    # Only weight bins that are actually visited; zero out unvisited bins
+    w = np.where(counts > 0, w, 0.0)
+    w_sum = w.sum()
+    if w_sum <= 0.0:
+        return float(np.sum(pi_ref_bins * f_obs_per_bin))
+    w_hat = w / w_sum
+    return float(np.sum(w_hat * f_obs_per_bin))
+
+
+def count_transitions(nhb: np.ndarray, threshold: int = 3) -> int:
+    """Count helix <-> coil transitions in an NHB time-series.
+
+    A transition is counted each time the signal crosses the threshold boundary
+    (from helix to coil or vice-versa), ignoring consecutive identical states.
+    """
+    nhb = np.asarray(nhb, dtype=int)
+    if nhb.size < 2:
+        return 0
+    states = (nhb >= threshold).astype(np.int8)
+    changes = np.diff(states)
+    return int(np.count_nonzero(changes))
+
+
 def evaluate_state(
     atlas: Atlas,
     nhb: np.ndarray,

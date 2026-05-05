@@ -18,6 +18,8 @@ class PolicyName(str, Enum):
     B2_MIN_COUNT_BIN = "min_count"
     B3_FARTHEST_LATENT = "farthest"
     B0_CHRONOLOGICAL = "chrono"
+    # P2: seeds chosen once at start from initial candidate expansion; never updated
+    P2_INDEPENDENT_REPLICAS = "independent_replicas"
 
 
 def uniform_prior_atlas(atlas: Atlas) -> Atlas:
@@ -75,6 +77,21 @@ def min_count_bin_pick(
     min_c = counts.min()
     contenders = np.flatnonzero(counts <= min_c + 1e-9)
     ii = int(rng.choice(contenders))
+    return ii, int(candidates[ii])
+
+
+def independent_replicas_pick(
+    candidates: np.ndarray,
+    preselected_queue: list[int],
+    rng: np.random.Generator,
+) -> tuple[int, int]:
+    """Pop next seed from a pre-committed queue; falls back to random if exhausted."""
+    if preselected_queue:
+        seed_f = preselected_queue.pop(0)
+        where = np.flatnonzero(candidates == seed_f)
+        if where.size > 0:
+            return int(where[0]), seed_f
+    ii = int(rng.integers(0, len(candidates)))
     return ii, int(candidates[ii])
 
 

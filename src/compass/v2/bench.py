@@ -18,12 +18,20 @@ from src.compass.replay_enhanced import _summarize_random as summarize_random_df
 from src.compass.v2.equivalence import EquivalenceMethod, expand_candidates
 from src.compass.v2.calibrate_m3_thresholds import load_m3_distance_cap_from_json
 from src.compass.v2.equivalence_index import build_and_save, load_index, load_macro_labels
-from src.compass.v2.evaluate import MilestoneTargets, cheating_audit_ok, effective_sample_size_timeseries, finalize_milestones
-from src.compass.v2.evaluate import evaluate_state
+from src.compass.v2.evaluate import (
+    MilestoneTargets,
+    cheating_audit_ok,
+    count_transitions,
+    effective_sample_size_timeseries,
+    evaluate_state,
+    finalize_milestones,
+    reweighted_observable,
+)
 from src.compass.v2.policy import (
     PolicyName,
     compass_pick,
     farthest_latent_pick,
+    independent_replicas_pick,
     min_count_bin_pick,
     random_pick,
 )
@@ -109,6 +117,14 @@ def run_v2_benchmark(
     allow_deterministic_reseed: bool,
     eq_mask_m3_by_calibration: bool = False,
     eq_m3_calibration_json: Path | None = None,
+    # Reference data for reweighted observable estimation (optional, loaded if None)
+    ref_pi_bins: np.ndarray | None = None,
+    ref_f_helix_per_bin: np.ndarray | None = None,
+    ref_f_open_per_bin: np.ndarray | None = None,
+    ref_bin_assignments: np.ndarray | None = None,
+    # Source coverage: A10 latent bin assignments for selected seeds (optional)
+    source_bin_assignments: np.ndarray | None = None,
+    n_source_bins: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     repo_root = cfg.repo_root
     atlas, arrays = build_atlas(cfg)
@@ -162,9 +178,52 @@ def run_v2_benchmark(
     cand_rows: list[dict[str, Any]] = []
     dec_rows: list[dict[str, Any]] = []
 
+    # P2 state: pre-selected seed queue (populated at cold start)
+    p2_queue: list[int] = []
+
     def record_metrics(step: int) -> dict[str, float]:
         idx = np.flatnonzero(state.observed_mask)
         m = evaluate_state(atlas, nhb, idx, cfg.helix_nhb_threshold, cfg.open_nhb_threshold)
+
+        extra: dict[str, Any] = {}
+
+        # Reweighted observable estimation (reference-importance-sampling)
+        if (
+            ref_pi_bins is not None
+            and ref_f_helix_per_bin is not None
+            and ref_f_open_per_bin is not None
+            and ref_bin_assignments is not None
+        ):
+            f_helix_rw = reweighted_observable(idx, ref_bin_assignments, ref_pi_bins, ref_f_helix_per_bin)
+            f_open_rw = reweighted_observable(idx, ref_bin_assignments, ref_pi_bins, ref_f_open_per_bin)
+            f_helix_ref_scalar = float(np.sum(ref_pi_bins * ref_f_helix_per_bin))
+            f_open_ref_scalar = float(np.sum(ref_pi_bins * ref_f_open_per_bin))
+            extra["f_helix_reweighted"] = f_helix_rw
+            extra["f_open_reweighted"] = f_open_rw
+            extra["f_helix_error_reweighted"] = abs(f_helix_rw - f_helix_ref_scalar)
+            extra["f_open_error_reweighted"] = abs(f_open_rw - f_open_ref_scalar)
+
+        # Cumulative helix<->coil transitions in observed NHB timeseries
+        if idx.size > 1:
+            nhb_obs = nhb[np.sort(idx)]
+            extra["n_transitions"] = count_transitions(nhb_obs, cfg.helix_nhb_threshold)
+        else:
+            extra["n_transitions"] = 0
+
+        # Source coverage: fraction of A10 source bins touched by seeds so far
+        if source_bin_assignments is not None and n_source_bins is not None and selected_seed_frames:
+            seed_arr = np.array(selected_seed_frames, dtype=int)
+            # clip to valid range (source_bin_assignments covers archive frames)
+            valid = seed_arr[seed_arr < len(source_bin_assignments)]
+            if valid.size > 0:
+                sb = source_bin_assignments[valid]
+                n_unique_src = int(np.unique(sb).size)
+                extra["coverage_source"] = float(n_unique_src) / float(n_source_bins)
+            else:
+                extra["coverage_source"] = 0.0
+        else:
+            extra["coverage_source"] = 0.0
+
         rows.append(
             {
                 "policy": policy.value,
@@ -174,6 +233,7 @@ def run_v2_benchmark(
                 "sampled_frames": int(state.n_observed_frames),
                 "sampled_ns": float(state.n_observed_frames) * FRAME_SPACING_NS,
                 **m,
+                **extra,
             }
         )
         return m
@@ -237,6 +297,27 @@ def run_v2_benchmark(
     chrono_cursor: int | None = int(b0) if policy == PolicyName.B0_CHRONOLOGICAL else None
 
     n_steps = cfg.n_steps
+
+    # P2 independent replicas: build candidate pool once and pre-select all seeds
+    if policy == PolicyName.P2_INDEPENDENT_REPLICAS:
+        visited_init = np.flatnonzero(state.observed_mask)
+        pool_init = build_candidate_pool(
+            visited_init,
+            neighbor_idx,
+            seg_helper,
+            used_seeds,
+            max_time_delta_frames=max_time_delta_frames,
+            same_segment_only=same_segment_only,
+            macro_labels=macro_labels,
+            require_same_macro=require_same_macro,
+            max_neighbors_per_anchor=max_neighbors_per_anchor,
+            neighbor_mask=neighbor_mask,
+        )
+        remaining_steps = n_steps - 1
+        if pool_init.size > 0:
+            n_pick = min(remaining_steps, pool_init.size)
+            chosen_idx = rng.choice(pool_init.size, size=n_pick, replace=False)
+            p2_queue = [int(pool_init[i]) for i in chosen_idx]
     last_pool = int(cand_rows[-1]["pool_size"]) if cand_rows else -1
 
     for step in range(2, n_steps + 1):
@@ -282,6 +363,8 @@ def run_v2_benchmark(
                 )
             elif policy == PolicyName.B1_RANDOM:
                 _, seed_f = random_pick(pool, rng)
+            elif policy == PolicyName.P2_INDEPENDENT_REPLICAS:
+                _, seed_f = independent_replicas_pick(pool, p2_queue, rng)
             elif policy == PolicyName.B2_MIN_COUNT_BIN:
                 _, seed_f = min_count_bin_pick(pool, bin_attempts, atlas, frontier_xy, rng)
             elif policy == PolicyName.B3_FARTHEST_LATENT:
@@ -376,7 +459,8 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo-root", type=Path, default=Path.cwd())
     p.add_argument("--output-dir", type=Path, default=Path("outputs/v2/a8q2_default"))
-    p.add_argument("--policy", type=str, default=PolicyName.B5_COMPASS.value, choices=[e.value for e in PolicyName])
+    p.add_argument("--policy", type=str, default=PolicyName.B5_COMPASS.value,
+                   choices=[e.value for e in PolicyName])
     p.add_argument(
         "--eq-method",
         type=str,

@@ -2,7 +2,7 @@
 # Run on the RunPod host (Linux). See scripts/pod2_orchestrate.py for details.
 set -euo pipefail
 
-REPO_ROOT="${BTP_REPO:-/workspace/BTP_2_Calm}"
+REPO_ROOT="${BTP_REPO:-/workspace/btp_2_compass}"
 SIM_DIR="${BTP_SIM_DIR:-${REPO_ROOT}/outputs/btp_equil/A8Q2}"
 TICA_DIR="${BTP_TICA_ARTIFACTS_DIR:-}"
 

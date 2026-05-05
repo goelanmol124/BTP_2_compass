@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ON the RunPod host (bash). Packs repo outputs/ and splits for reliable download.
 set -euo pipefail
-REPO_ROOT="${1:-/workspace/BTP_2_Calm}"
+REPO_ROOT="${1:-/workspace/btp_2_compass}"
 cd "$REPO_ROOT"
 echo "[1/3] Creating single tarball (uncompressed — DCDs barely compress) …"
 rm -f /tmp/btp_outputs_bundle.tar

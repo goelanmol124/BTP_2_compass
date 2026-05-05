@@ -1,5 +1,5 @@
 """
-BTP_2_Calm — TICA CV Transferability Between Helix-Coil Peptides
+btp_2_compass — TICA CV Transferability Between Helix-Coil Peptides
 ================================================================
 
 This package contains shared utilities, configuration constants, and analysis

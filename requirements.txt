@@ -1,4 +1,4 @@
-# BTP_2_Calm — pip install -r requirements.txt
+# btp_2_compass — pip install -r requirements.txt
 # Full stack (core + optional): pip install -r requirements-optional.txt
 # OpenMM with CUDA: see docs/OPENMM_INSTALL.md (e.g. pip install 'openmm[cuda12]')
 

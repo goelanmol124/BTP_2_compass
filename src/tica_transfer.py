@@ -990,10 +990,14 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("TICA TRANSFERABILITY ASSESSMENT COMPLETE")
     print("=" * 60)
-    print(f"  D₀         = {results['D0']:.4f}   {results['interpretation_d0'].split('→')[1].strip()}")
-    print(f"  D_τ        = {results['D_tau']:.4f}   {results['interpretation_dtau'].split('→')[1].strip()}")
-    print(f"  D_KM       = {results['D_KM']:.4f}   {results['interpretation_dkm'].split('→')[1].strip()}")
-    print(f"  Pearson |r|= {results['pearson_abs_r']:.4f}   {results['interpretation_r'].split('→')[1].strip()}")
+    def _tail(s: str) -> str:
+        parts = s.split("→", 1)
+        return parts[1].strip() if len(parts) > 1 else s.strip()
+
+    print(f"  D₀         = {results['D0']:.4f}   {_tail(results['interpretation_d0'])}")
+    print(f"  D_τ        = {results['D_tau']:.4f}   {_tail(results['interpretation_dtau'])}")
+    print(f"  D_KM       = {results['D_KM']:.4f}   {_tail(results['interpretation_dkm'])}")
+    print(f"  Pearson |r|= {results['pearson_abs_r']:.4f}   {_tail(results['interpretation_r'])}")
     print()
     print(f"  OVERALL: {results['overall_verdict']}")
     print()

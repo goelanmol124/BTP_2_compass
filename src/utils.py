@@ -1,5 +1,5 @@
 """
-utils.py — Shared utility functions for the BTP_2_Calm simulation pipeline.
+utils.py — Shared utility functions for the btp_2_compass simulation pipeline.
 
 Functions here are used by two or more notebooks/scripts and must not carry
 hard-coded simulation parameters — import those from config.py instead.

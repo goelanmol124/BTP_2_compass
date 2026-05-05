@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from scipy.stats import pearsonr
 
 # ---------------------------------------------------------------------------
 # Import simulation parameters from the single source of truth
@@ -615,7 +616,7 @@ def _try_train_native_tica(
         tic1_values = tica_model.transform(features_pool)
         if tic1_values.ndim == 2:
             tic1_values = tic1_values[:, 0]
-        pearson_r = float(np.corrcoef(tic1_values, nhb_pool)[0, 1])
+        pearson_r = float(pearsonr(tic1_values, nhb_pool)[0])
         abs_r = abs(pearson_r)
     except Exception as exc:
         log.warning(

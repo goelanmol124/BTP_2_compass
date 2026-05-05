@@ -1802,7 +1802,7 @@ def main() -> None:
                 pass
 
     parser = argparse.ArgumentParser(
-        description="BTP_2_Calm MD simulation pipeline (Phases 1–4).",
+        description="btp_2_compass MD simulation pipeline (Phases 1–4).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
