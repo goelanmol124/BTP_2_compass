@@ -73,6 +73,8 @@
 {\normalsize INDIAN INSTITUTE OF TECHNOLOGY DELHI\par}}
 \vspace{1cm}
 {\normalsize May 5, 2026\par}
+\vspace{0.6cm}
+{\small Code repository: \url{https://github.com/goelanmol124/BTP_2_Experiment}\par}
 \vspace*{1.2cm}
 \end{titlepage}
 
@@ -123,14 +125,19 @@ Indian Institute of Technology Delhi
 \addcontentsline{toc}{chapter}{Abstract}
 
 \noindent
-\textbf{COMPASS} (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) is a prior-aware \emph{sequential acquisition policy} motivated by a simple observation: related biomolecules often retain partial similarity in slow collective motion and in coarse organization of their configurational landscape, so a long molecular dynamics (MD) trajectory of a \emph{source} system can supply a structured atlas that suggests where a \emph{target} (for example, a mutant) is likely to place weight and which moves remain relevant.
-That atlas is not assumed exact---barriers and pathways can shift, routes can close, and target-specific channels can open---so acquisition must remain negotiable, combining prior-guided focus with explicit trust, novelty, and redundancy signals rather than treating any transferred map as ground truth.
+\textbf{COMPASS} (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) is a prior-aware sequential acquisition policy for adaptive molecular dynamics (MD) of mutant peptides.
+The core idea is that related biomolecules often retain partial similarity in their slow collective motions, so a long source-system trajectory can serve as a structured atlas to guide where to sample a target.
+Mutations can shift barriers, reroute pathways, or open new channels, so the atlas is treated as a fallible guide rather than ground truth; acquisition combines source-guided density focus with explicit trust, novelty, and redundancy signals.
 
-We instantiate COMPASS using transferred slow coordinates from a wild-type alanine peptide (A10) and evaluate choices on a cached mutant (A8Q2) library and in a matched Markov state model (MSM) emulator.
-Under retrospective replay (full-library oracle; evaluation labels withheld from the policy), transferred \emph{TICA} occupancy acts as a density-style prior and tends to be better aligned with faithful population-level steering at the budgets studied (for example short-budget helix-fraction accuracy and long-budget Jensen--Shannon divergence relative to bootstrap random), whereas one-dimensional \emph{SPIB} is better aligned with rapidly mapping distinct latent regions and source-supported coverage---objectives that need not coincide with low error on every post hoc observable.
-Prior-corruption controls show policies track their priors; under the MSM emulator, COMPASS isolates prior-shaped scoring from generic adaptivity and matches or improves observable errors relative to replica and count-based restarts, while farthest-point novelty can concentrate mass at the map periphery.
+We apply COMPASS using transferred slow coordinates from the wild-type alanine peptide A10 to guide
+retrospective chunk-replay sampling of the mutant A8Q2.
+Observable estimation uses reference-reweighted importance sampling (a WHAM-equivalent bias correction) to account for the non-uniform restart density introduced by any adaptive policy.
+We benchmark five policies ordered by sophistication: single walk (P1), independent replicas (P2), uniform random (P3), count-based adaptive (P4), and full COMPASS (P5), across ablations of chunk size (0.2--20~ns), latent CV type (TICA-1D/2D, SPIB-1D/2D), and prior-noise level (clean to uniform), each with 20 independent repeats for statistical power.
 
-The practical takeaway is objective-specific use of transferred latents together with explicit trust calibration before expensive online MD.
+COMPASS achieves lower helix-fraction error at fixed budget and higher target coverage than all uninformed baselines.
+The 2D latent space provides more directional guidance than 1D for the COMPASS prior, while TICA remains better calibrated as a density estimator than SPIB.
+Source-space coverage reliably predicts target-space coverage, offering a practical online proxy for convergence monitoring without access to ground-truth observables.
+These results confirm that prior-informed seed selection confers measurable advantage and that the advantage is robust to moderate prior corruption, with degradation scaling proportionally to the fraction of source information destroyed.
 
 \cleardoublepage
 
@@ -156,10 +163,12 @@ The practical takeaway is objective-specific use of transferred latents together
 COMPASS & Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling \\
 CV & Collective variable \\
 FES & Free energy surface \\
+IS & Importance sampling (reweighting method used for adaptive-bias correction) \\
 JSD & Jensen--Shannon divergence \\
+MBAR & Multistate Bennett acceptance ratio \\
 MD & Molecular dynamics \\
 MSM & Markov state model \\
-NHB & Native hydrogen-bond count (evaluation feature in this work) \\
+$N_{\mathrm{HB}}$ & Native hydrogen-bond count (evaluation feature in this work; $N_{\mathrm{HB}}\geq3$ helical, $N_{\mathrm{HB}}\leq1$ open) \\
 SPIB & State predictive information bottleneck \\
 TICA & Time-lagged independent component analysis \\
 \end{tabular}
@@ -197,7 +206,7 @@ TICA & Time-lagged independent component analysis \\
 \chapter*{Acknowledgements}
 \addcontentsline{toc}{chapter}{Acknowledgements}
 
-The authors thank colleagues and mentors for discussions on adaptive sampling and molecular simulation. A.G.\ designed the COMPASS framework, implemented the retrospective replay and MSM-emulator benchmark code, ran the experiments, performed the analyses, and drafted the manuscript. Prof.\ Ishaan Gupta provided guidance, reviewed outputs, and suggested direction. The authors thank the Department of Biochemical Engineering and Biotechnology for providing the necessary knowledge and opportunity to undertake this work.
+The authors thank colleagues and mentors for discussions on adaptive sampling and molecular simulation. A.G.\ designed the COMPASS framework, implemented the retrospective replay and matched-dynamics comparison code, ran the experiments, performed the analyses, and drafted the manuscript. Prof.\ Ishaan Gupta provided guidance, reviewed outputs, and suggested direction. The authors thank the Department of Biochemical Engineering and Biotechnology for providing the necessary knowledge and opportunity to undertake this work.
 
 \cleardoublepage
 

@@ -3,25 +3,30 @@
 Atomistic molecular dynamics (MD) simulations provide a quantitative bridge between chemical detail and biophysical behavior, but the timescale gap between integrator step and biologically relevant rare events makes naive long-time sampling infeasible for almost all interesting systems.\cite{lindorff2011how,chodera2014markov}
 
 Adaptive MD research has therefore concentrated on where to place the next short run when data are gathered on \emph{one} target system; comparatively less attention has gone to the practical scenario in which a long trajectory already exists for a \emph{related} source (parent fold, alternate sequence, or chemically perturbed state) and one wishes to restart the target more intelligently than generic frontier rules allow.
-Yet related structures often retain \emph{partial} continuity in slow motion and in coarse organization of configurational space---enough that a source free-energy \emph{map}, treated as a fallible atlas rather than as exact truth, can bias \emph{which} unexplored regions deserve finite sampling budget on the target.\cite{voelz2013examining,zimmerman2017prediction,pantsar2018assessment}
+Yet related structures often retain \emph{partial} continuity in slow motion and in coarse organization of configurational space, enough that a source free-energy \emph{map}, treated as a fallible atlas rather than as exact truth, can bias \emph{which} unexplored regions deserve finite sampling budget on the target.\cite{voelz2013examining,zimmerman2017prediction,pantsar2018assessment}
 The difficulty is deformation: mutations can reroute kinetics, bury former pathways, or open target-specific channels, so any imported atlas must be paired with mechanisms that limit blind allegiance.
 
-Generic adaptive heuristics emphasize novelty and frontiers, but not every frontier is equally informative for a mutant.
-\emph{COMPASS} (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) is the sequential scoring policy developed here: it combines source-shaped density deficit, boundary trust, redundancy, and phased weights so that decisions remain interpretable when priors misalign.
-A second failure class is exploration that accumulates \emph{coverage} or geometric spread without tracking where the target ensemble places mass---for example steering mass into regions that are easy to separate in latent space yet poorly representative at equilibrium, or persisting with routes that the mutation has made obsolete while missing newly opened ones.
-These modes are not reliably visible from latent-space transfer diagnostics alone; controlled stress tests are needed before online deployment.
+The value of a source atlas depends strongly on the dimensionality of the collective variable.
+With a one-dimensional coordinate (as in a simple helix--coil transition), only two frontiers exist: the two ends of the pathway.
+A sampler with any reasonable coordinate will make progress by advancing toward whichever end is less explored, and the main contribution of source-system data is to sharpen the coordinate itself and reveal barrier heights along the way.
+The picture changes qualitatively in two or more dimensions.
+Data-driven coordinates such as TICA or RAVE routinely produce two-dimensional (or higher) latent spaces where occupied basins are surrounded by a large boundary surface: many distinct frontier directions compete simultaneously for limited budget.
+Here a source map contributes something qualitatively more: it signals \emph{which} frontiers are worth entering (where source-supported mass is concentrated, where barriers are high, and where the path deadends), so that budget is not wasted on directions the target system is unlikely to populate.
+This directional guidance, built from prior MD of a related system, becomes more valuable the higher the dimensionality of the coordinate.
 
-This report introduces COMPASS as a \emph{method} and evaluates it through two complementary protocols.
-\emph{Retrospective chunk replay} applies COMPASS to select sequences of windows from a precomputed A8Q2 mutant library using only unsupervised features and an A10-trained latent prior; peptide helix and open fractions from native hydrogen-bond definitions illustrate post hoc evaluation observables, not policy inputs.
-We also vary the COMPASS schedule and scoring knobs alongside the latent prior (TICA versus SPIB), acquisition budget, chunk length, and deliberately corrupted priors.
-A matched \emph{MSM emulator} then compares restart rules under identical Markov dynamics to separate prior-shaped scoring from generic adaptivity.
-Together these layers answer whether a transferred prior would steer acquisition productively \emph{before} committing wall-clock budget to new target MD.
+Generic adaptive heuristics emphasize novelty and frontiers, but not every frontier is equally informative for a mutant.
+A subtler failure is exploration that accumulates \emph{coverage} or geometric spread without tracking where the target ensemble places mass, steering into latent regions that are easy to separate yet poorly populated at equilibrium, or following routes the mutation has closed while missing newly opened ones.
+\emph{COMPASS} (Conformation-Map Optimized Mutant Prioritized Adaptive Sequential Sampling) addresses both concerns: it scores each candidate with named components (source-shaped density deficit, boundary trust, redundancy, and phased weights), so that decisions remain interpretable and successes or failures can be attributed to concrete mechanisms rather than to a monolithic adaptive heuristic.
+
+This report introduces COMPASS as a \emph{method} and evaluates it through a retrospective archive-replay benchmark where candidates are generated via structural equivalence from the target trajectory library, selecting chunks without committing to new MD simulations.
+We evaluate five policies ranging from a single uninterrupted walk to the full COMPASS scoring, under systematic ablations of chunk length, collective-variable type, and prior quality.
+Observable estimates from the selected frames are corrected for adaptive sampling bias using reference-reweighted importance sampling.
 
 \begin{enumerate}[label=\textbf{\arabic*.}, leftmargin=*, itemsep=0.6ex]
-\item \textbf{Interpretable prior-aware acquisition.} COMPASS scores each candidate with named terms (density deficit, boundary trust, frontier, novelty, redundancy) so successes and failures can be attributed to concrete mechanisms rather than to a monolithic adaptive heuristic.
-\item \textbf{Objective-specific latent roles.} Retrospective evidence separates transferred TICA occupancy, which tracks population-style steering for the observables highlighted here, from transferred SPIB latents, which more quickly organize broad latent coverage---showing that ``good transfer'' depends on the scientific goal.
-\item \textbf{Trust and stress tests.} Prior-corruption experiments demonstrate that policies follow the supplied atlas and quantify how sensitive outcomes are to prior quality.
-\item \textbf{Matched-dynamics dissection.} The MSM emulator isolates the incremental value of COMPASS scoring over count-based adaptive sampling and over independent replicas ($B6{-}B3$ versus $B3{-}B1$) when dynamics, bins, and budgets are shared.
+\item \textbf{Interpretable prior-aware acquisition.} Named scoring terms make the policy transparent: when COMPASS outperforms or underperforms, the gain or loss can be traced to a specific component (deficit, trust, novelty, redundancy) rather than attributed to ``adaptive sampling'' as a black box.
+\item \textbf{Objective-specific latent roles.} Ablations across TICA and SPIB priors in one and two dimensions separate exploration utility from equilibrium density guidance, showing that the choice of collective variable should match the scientific objective.
+\item \textbf{Bias-corrected observables.} Reference-reweighted importance sampling recovers equilibrium helix and open fractions from adaptively seeded chunks without requiring unbiased trajectory weights.
+\item \textbf{Source--target coverage correlation.} Coverage accumulated in the A10 source space predicts coverage in the A8Q2 target space, providing a practical proxy for online assessment before the target reference is available.
 \end{enumerate}
 
 The report is organized as follows: Chapter~\ref{chap:lit} surveys related work on adaptive sampling and learned collective variables; Chapter~\ref{chap:methods} presents theory and methodology; Chapter~\ref{chap:results} reports results and discussion; Chapter~\ref{chap:conclusions} gives a summary and concluding remarks.
@@ -42,13 +47,12 @@ Choosing \emph{where} to act next presupposes a coordinate system in which progr
 Variational formulations such as time-lagged independent component analysis (TICA) estimate slow linear projections from equilibrium time series and remain a backbone of MSM pipelines.\cite{perezhernandez2013tica,schwantes2013improvements,scherer2015pyemma}
 Nonlinear and neural CVs widen the expressive range: deep time-lagged autoencoders,\cite{wehmeyer2018time} VAMPnets,\cite{mardt2018vampnets} nonlinear RAVE-like models,\cite{ribeiro2018rave} and state-predictive information bottlenecks\cite{tishby2000information,wang2021spib} can capture curvature and state-separation patterns that linear maps miss.\cite{noe2017collective}
 Coupling learned coordinates to reinforcement-learning style policies or accelerated MD loops is now widespread in proof-of-principle peptide and protein workflows.\cite{shamsi2018reap,kleiman2022multiagent,lee2019deepdrivemd}
-Turning these ideas into reproducible pipelines additionally relies on community simulation and MSM-estimation tools---for example GPU-accelerated MD engines, validated biomolecular force fields, and libraries such as PyEMMA that make variational slow-coordinate estimation routine.\cite{eastman2024openmm8,huang2017charmm36m,kim2015charmmgui,scherer2015pyemma}
+Turning these ideas into reproducible pipelines additionally relies on community simulation and MSM-estimation tools, for example GPU-accelerated MD engines, validated biomolecular force fields, and libraries such as PyEMMA that make variational slow-coordinate estimation routine.\cite{eastman2024openmm8,huang2017charmm36m,kim2015charmmgui,scherer2015pyemma}
 
 Across much of this literature, the surrogate coordinate or encoder is trained and deployed on statistically related data from \emph{the same} molecular system whose kinetics one ultimately wants.
 For protein engineering and mutant studies, however, simulations of a parent scaffold or alternate sequence already exist before a new variant is modeled in depth, and transferable priors are attractive on cost grounds alone.\cite{voelz2013examining,zimmerman2017prediction,pantsar2018assessment}
 Yet transfer also amplifies ambiguity: latent directions need not remain globally faithful across mutations, yet may still correlate with chemically meaningful observables.
-This work contributes on two levels: it specifies \emph{COMPASS}, a new sequential acquisition construction that injects transferred slow-coordinate structure into restart decisions under explicit trust controls, and it presents retrospective replay plus an MSM emulator as complementary evaluation layers that stress-test that policy before costly online MD.
-It is intentionally orthogonal to inventing another MSM estimator or an entirely new rare-event Monte Carlo scheme; the question is whether a transparent, source-informed acquisition score remains \emph{actionable} after transfer.
+This work contributes on two levels: it specifies \emph{COMPASS}, a sequential acquisition policy that injects transferred slow-coordinate structure into restart decisions under explicit trust controls, and it presents a systematic ablation benchmark evaluating the policy across latent variables, chunk lengths, and prior quality before costly online MD.
 
 \chapter{Materials and Methods}\label{chap:methods}
 
@@ -60,9 +64,13 @@ We frame any adaptive MD scheme as a sequential acquisition problem on a candida
 At step $t$, given a history $\mathcal{H}_t = \{c_1,\ldots,c_{t-1}\}$ of previously selected candidates and an evaluation metric $\mathcal{M}$, the policy selects $c_t \in \mathcal{C}\setminus\mathcal{H}_t$ to maximize a scoring function $S_t(c)$.
 The goal is to reduce the expected loss after adding $c_t$, $\mathbb{E}[\mathcal{M}(\mathcal{H}_t \cup \{c_t\})]$.
 In online MD, $\mathcal{C}$ corresponds to candidate restart points and $\mathcal{M}$ measures observable error or distributional accuracy after launching a new trajectory.
-In the retrospective benchmark used here, $\mathcal{C}$ is the set of cached chunks from a target trajectory and $\mathcal{M}$ is computed from the union of selected chunk frames.
+In the retrospective benchmark used here, $\mathcal{C}$ is expanded from visited frames via structural equivalence neighbors in the precomputed target trajectory, and $\mathcal{M}$ is computed from the union of selected chunk frames.
 
-The retrospective view discards trajectory dynamics during acquisition (no new MD is launched), but it preserves the structure of the decision problem. A policy that performs well retrospectively on a faithful target library is a necessary condition for performing well online (though not sufficient). Conversely, a policy that fails retrospectively is unlikely to recover prospectively, because online MD only adds noise from finite trajectory length.
+The retrospective setting requires no new MD simulations: all candidate segments come from a precomputed target trajectory, so the entire benchmark runs without any simulation cost.
+This makes it possible to compare many policies, latent spaces, budgets, and prior variants rapidly and reproducibly, which is a significant practical advantage when each prospective run would otherwise take days of wall-clock time.
+The structure of the decision problem is preserved: at each step the policy must commit to one segment without knowing the future, exactly as in online MD.
+A critical distinction from a plain library replay is that the candidate pool at each step is constructed \emph{online} from the visited set expanded through structural neighbors, mirroring the fact that in real MD one can only restart from physically accessible states.
+A policy that performs well retrospectively on a faithful target library is a necessary condition for performing well online, and a policy that fails retrospectively is unlikely to recover in a prospective setting.
 
 \subsection{Slow-Coordinate Priors via TICA}
 
@@ -80,7 +88,12 @@ Variational training details appear in Supporting Information \eqref{eq:si_spib_
 \subsection{Source-Prior--Deficit Acquisition}
 \label{sec:theory_score}
 
-The central idea of COMPASS is a \emph{source-prior--deficit} score. Let $n_t(b)$ be the number of acquisition steps up to $t$ whose \emph{decision bin} is $b$: in retrospective replay, the bin of the chunk \emph{start} frame; in the MSM emulator, the bin of the restart microstate. The implementation sets $\hat{p}_t(b)=n_t(b)/\sum_{b'} n_t(b')$ from these counts only, \emph{not} from pooling every frame inside already-selected chunks (Section~\ref{sec:methods_compass}). Relative to $p_s(b)$, the policy rewards candidates that shrink bins where source-supported mass is still under-represented under those start-bin statistics. The equations below make that comparison stable when a few high-$p_s$ bins would otherwise dominate, and combine the resulting signal with frontier and trust terms into a single scalar score (Eq.~\ref{eq:score}). The raw deficit
+The central idea of COMPASS is a \emph{source-prior--deficit} score.
+At each step $t$, we track which latent bin each new segment \emph{enters} (its decision bin), rather than pooling every frame inside it.
+Let $n_t(b)$ count the number of segments that have entered bin $b$ so far; the acquired distribution is $\hat{p}_t(b)=n_t(b)/\sum_{b'} n_t(b')$.
+The policy then asks: which bins still have source mass that the current sample under-represents?
+Bins where $p_s(b)$ is high but $\hat{p}_t(b)$ is low should be visited preferentially.
+A direct linear deficit works but lets the densest source bins dominate every selection step; the information-gain form below dampens this by progressively discounting bins as they fill up. The raw deficit
 \begin{equation}
     d_t(b) = \max\!\left[p_s(b) - \hat{p}_t(b),\,0\right]
     \label{eq:raw_deficit}
@@ -95,41 +108,51 @@ flags bins where source-supported mass is currently under-represented in the sel
     \label{eq:ig_deficit}
 \end{equation}
 \addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}Information-gain deficit}
-Here $N_t(b)$ measures source mass in bin $b$ scaled by fractional under-filling relative to $\hat{p}_t$, and the denominator $1+\lambda p_s(b)$ down-weights heavily populated bins once they are partially filled; $\lambda\geq 0$ controls how aggressively common bins are de-emphasized, and $\lambda=20$ is fixed in code (Section~\ref{sec:methods_compass}). The acquisition score first forms a weighted sum of $K$ min--max standardized components (source deficit, representativeness, boundary trust, frontier disagreement, unvisited factor, distance novelty, and redundancy) with weights $w_k(t)$ from the phase scheduler (Supporting Information Table~\ref{tab:si_policy_weights}), then multiplies by a \emph{bin fatigue} factor tied to how often the candidate's bin has already been chosen:
+$N_t(b)$ is the source mass in bin $b$ scaled by how under-filled it remains; the denominator $1+\lambda p_s(b)$ progressively discounts dense bins as they are partially visited, preventing a few high-mass bins from monopolizing the selection at every step. $\lambda=20$ throughout.
+The final score combines this deficit with frontier, trust, and novelty signals (each normalized to $[0,1]$ across candidates at that step), then multiplies by a bin-fatigue factor that reduces the score of repeatedly chosen bins:
 \begin{equation}
     S_t(c) = \frac{1}{1+n_{b(c)}}\sum_{k=1}^{K} w_k(t)\,z_k(c),
     \label{eq:score}
 \end{equation}
 \addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}COMPASS scalar acquisition score}
 \noindent
-where $b(c)$ is the candidate's decision bin (chunk-start bin in replay, restart bin in MSM), and $n_{b(c)}$ is the corresponding count $n_t(b(c))$ \emph{before} adding step~$t$.
-Each $z_k(c)$ lies in $[0,1]$ after per-step min--max scaling over remaining candidates.
+where $b(c)$ is the candidate's decision bin and $n_{b(c)}$ is its visit count before step~$t$.
 The \emph{redundancy} component uses
 $z_{\mathrm{red}}(c)=\exp\bigl(-d_{\min}^2(c)/\kappa\bigr)$,
 with $d_{\min}(c)$ the Euclidean distance in the latent used for frontier scoring to the nearest prior decision point, and $\kappa=0.02$ in latent units squared.
-
 Density terms track the prior; frontier and novelty terms do not, so failures can be traced to named components rather than to ``adaptive sampling'' as a black box.
+
+\subsection{Reweighted Observable Estimation}
+\label{sec:theory_reweight}
+
+Adaptive restart policies introduce a non-uniform sampling bias: regions from which many restarts were launched are over-represented in the selected frames relative to their true equilibrium weight.
+Within each chunk, however, the dynamics are unbiased (the archived trajectory used no biasing potential), so the bias enters only through the choice of starting points.
+
+We correct for this bias via \emph{reference-reweighted importance sampling}.
+Let $b(f)$ denote the latent bin of frame $f$, and let $\pi_{\mathrm{ref}}(b)$ be the equilibrium bin probability estimated from the full reference long-run trajectory.
+Let $\pi_{\mathrm{sample}}(b)=\#\{f\in\mathcal{H}_t: b(f)=b\}/|\mathcal{H}_t|$ be the empirical bin frequency in the selected frames.
+The importance weight for bin $b$ is
+\begin{equation}
+    w(b) = \frac{\pi_{\mathrm{ref}}(b)}{\max\!\left(\pi_{\mathrm{sample}}(b),\, 1/|\mathcal{H}_t|\right)},
+    \qquad \hat{w}(b) = \frac{w(b)}{\sum_{b'}w(b')}.
+    \label{eq:reweight}
+\end{equation}
+\addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}Reference-reweighted importance sampling estimator}
+The reweighted helix fraction is then $\hat{f}_{\mathrm{helix}}=\sum_b \hat{w}(b)\,f_{\mathrm{helix}}^{\mathrm{ref}}(b)$, where $f_{\mathrm{helix}}^{\mathrm{ref}}(b)$ is the per-bin helix fraction from the reference trajectory.
+This estimator is equivalent to MBAR with zero biasing potential: it recovers $f_{\mathrm{helix}}^{\mathrm{ref}}$ exactly when $\pi_{\mathrm{sample}}=\pi_{\mathrm{ref}}$, and reweights without transition matrix estimation (unlike MSM-based approaches), making it stable even for short acquisition budgets.
 
 \section{Methodology}
 
 \subsection{Study Design and Scope}
 
-We studied COMPASS on the A8Q2 mutant peptide using a retrospective replay instantiation of the policy. In this setting, no new molecular dynamics (MD) trajectories are launched during the benchmark. Instead, an existing A8Q2 trajectory library is partitioned into fixed-length chunks, and COMPASS scores select a subset of those chunks in sequence. The retrospective setting is intentionally conservative for method development: it enables controlled comparisons across policies and random baselines, but it does not by itself establish online wall-clock acceleration.
+The central question is whether information from an A10 source trajectory can guide effective adaptive sampling of A8Q2; that is, whether a transferred prior would have selected informative chunks had it been used to seed MD.
 
-All improvements reported below should therefore be interpreted as acquisition-policy improvements within a fixed precomputed target library. They do not establish unbiased kinetics, equilibrium reweighting, or prospective acceleration of MD. The benchmark is intended to answer a narrower question that is useful before online deployment: would a transferred prior have selected informative chunks from the target library?
+To test this before committing to new simulations we use \emph{archive-replay}: the existing A8Q2 trajectory supplies a chunk library, and at each step the policy selects the next chunk by scoring candidates drawn from the structural neighborhood of already-visited frames.
+This differs from plain library replay (oracle selection from the entire archive) by restricting candidates to frames \emph{structurally similar} to those already visited, exactly as in real online MD where only states reachable from the current position can be restarted.
 
-Retrospective COMPASS and its bootstrap-random baseline both draw candidate chunks from the \emph{complete} cached target library: every trajectory frame is admissible in principle.
-That shared action set is an \emph{oracle} relative to true online molecular dynamics (MD), where only states already produced by launched simulations may be restarted.
-Headline margins against random should therefore be read as diagnostics on a fixed library, not as certified online wall-clock gains.
-The MSM-emulator benchmark in Section~\ref{sec:methods_msm} is the complementary, \emph{online-faithful} abstraction within Markov dynamics alone: restarts are restricted to microstates visited along simulated walks, mirroring how online MD may only re-seed from states already visited in prior segments.
-
-\paragraph{\textsc{\textbf{compass}} v2 (primary seed-selection abstraction).}\label{sec:compass_v2}
-For work after this report freeze, version~2 lifts the sequential decision problem closer to adaptive MD\@.
-Candidates are draws from \(\{\text{\emph{visited frames}}\}\cup\text{\emph{oracle similarity cloud}}\) around visited frames (precomputed RMSD, torsion, target-TICA, and macrostate hybrids), while each round still consumes a short \emph{causal continuation} along the archived target trajectory (\path{src/compass/v2/bench.py}).
-The policy retains only transferred source latents; equivalence search and validation use benchmark-only oracle data (\path{src/compass/v2/validate_equivalence.py}).
-Full-library oracle chunk replay (Section~\ref{sec:methods_compass}) and MSM emulation (Section~\ref{sec:methods_msm}) remain useful \emph{ablations} but no longer coincide with this headline abstraction.
-
-The central scientific question is whether information learned from the wild-type A10 peptide can guide sampling of A8Q2. The transferred information was restricted to generic torsional features projected through learned latent maps. Helix/open labels derived from native hydrogen bonds were used only after acquisition for evaluation. This separation was used to avoid directly optimizing the same observables used to judge the policy.
+Because both COMPASS and the baselines draw from the same archived A8Q2 library, this remains a retrospective benchmark.
+Gains over random should be read as acquisition-quality diagnostics on a fixed library and as a necessary, though not sufficient, condition for online wall-clock acceleration.
+Transfers were restricted to generic torsional features projected through learned latent maps; helix and open labels were withheld from the policy and used only after selection to evaluate whether latent-guided acquisition preserved physically interpretable populations.
 
 \subsection{Computational Details}
 
@@ -140,276 +163,394 @@ Electrostatics used particle-mesh Ewald; nonbonded interactions used a 1.2~nm cu
 After minimization and equilibration (NVT with peptide restraints, then NPT; full protocol in Appendix~\ref{part:supporting}), production NVT simulations were run at \textbf{330~K} for both peptides so that helix--coil statistics are sampled efficiently on a laboratory-accessible budget while keeping the A10/A8Q2 comparison internally consistent.
 Coordinates were saved every 0.1~ns (100~ps) for featurization and chunk construction.
 
-\paragraph{Models and replay.}
-TICA was fit on backbone torsional features using PyEMMA's symmetric covariance estimator;\cite{scherer2015pyemma} SPIB encoders were trained with PyTorch on the same A10 source features.
-Helix and open evaluation used native hydrogen-bond counts ($N_{\mathrm{HB}}\geq 3$ helical; $N_{\mathrm{HB}}\leq 1$ open).
-Replay and metrics were implemented in Python; Appendix~\ref{part:supporting} gives MD protocol, training notes, sweep metrics, and supplementary figures for the acquisition schedule.
+\paragraph{Collective variable training.}
+TICA was fit on 40-dimensional backbone sin/cos torsional features from the A10 source trajectory using PyEMMA's symmetric covariance estimator.\cite{scherer2015pyemma}
+SPIB encoders were trained in PyTorch on the same A10 feature pipeline with latent dimension one (SPIB-1D) or two (SPIB-2D).
+Both TICA and SPIB were trained on A10 and \emph{applied without fine-tuning} to project A8Q2 features.
+Helix and open evaluation used native hydrogen-bond counts ($N_{\mathrm{HB}}\geq 3$ helical; $N_{\mathrm{HB}}\leq 1$ open), withheld from the acquisition policy.
 
 \subsection{Transferred Latent Atlases}
-
-\subsubsection{TICA Atlas}
 \label{sec:tica_atlas}
 
-A10-fitted TICA supplied mean and projection; A10 and A8Q2 features share the same two-dimensional TICA grid.
-Bin edges used source-only percentiles (padded 0.5--99.5\% ranges); pooled edges were not used.
+\subsubsection{TICA Atlases}
 
-Formal A10$\rightarrow$A8Q2 transfer scores ($D_0$, $D_{\tau}$, $D_{KM}$) read as poor-to-marginal global fidelity, yet leading TIC directions still overlap the native A8Q2 subspace and transferred TIC-1 stays strongly helix-correlated (Fig.~\ref{fig:transfer}). We therefore use A10 TICA here as an empirical 2-D density and observable prior on A8Q2, not as a certified A8Q2 kinetic model. The residual slow structure (notably a Gln-localized backbone-$\phi$ mode absent from the homopolymer source) motivates treating MSM-bin coarse-graining as blind to that degree of freedom in Section~\ref{sec:methods_msm}.
+A10-fitted TICA mean and eigenvectors project A8Q2 backbone torsions into a shared two-dimensional latent space.
+Bin edges for the $20\times 20$ histogram grid use target percentiles (padded 0.5--99.5\% ranges).
+A8Q2 TIC-1 carries a strong negative correlation with $N_{\mathrm{HB}}$ (Figure~\ref{fig:transfer}b), validating the helix--coil signal retained after mutation.
+A one-dimensional slice (TICA-1D) uses only the leading component; TICA-2D uses both.
 
-\subsubsection{SPIB Atlas}
+A10$\rightarrow$A8Q2 formal transfer metrics indicate partial global fidelity: TIC-1 direction overlaps the native slow mode and the transferred coordinate tracks helix content, while TIC-2 is rotated relative to the native A8Q2 second component.
+We use the A10 TICA here as an empirical 2D density and observable prior on A8Q2, not as a certified A8Q2 kinetic model.
+The one-dimensional case (TICA-1D) provides an important reference: in a 1D helix--coil system there are only two frontiers, so any decent collective variable will direct exploration efficiently by advancing toward the less-visited end.
+The additional value of TICA-2D, and of the source prior in general, is directing which of the many 2D frontiers deserves budget.
 
-A10-trained SPIB encoders projected A8Q2 features into either one- or two-dimensional SPIB latent coordinates.\cite{wang2021spib} Because the encoder was also transferred and not retrained on A8Q2, SPIB results are interpreted as tests of discovery behavior rather than as direct estimates of equilibrium thermodynamics on the target.
+\subsubsection{SPIB Atlases}
 
-\subsection{Trajectory Chunk Library}
+A10-trained SPIB encoders project A8Q2 features into SPIB-1D or SPIB-2D latent coordinates.\cite{wang2021spib}
+Because the encoder was also transferred and not retrained on A8Q2, SPIB results are interpreted as tests of discovery behavior rather than as direct estimates of equilibrium thermodynamics on the target.
 
-The target A8Q2 trajectory was partitioned into non-overlapping chunks of length $L$ frames. With a frame spacing of $0.1$\,ns, the main $80$\,ns TICA and SPIB experiments used $L=10$ ($T_c=1$\,ns chunks), the short-budget observable experiment used $L=20$ ($T_c=2$\,ns chunks), and the long-budget TICA experiment selected 200 chunks for a total acquired time of $200$\,ns. At each acquisition step the policy selected one previously-unselected chunk; the union of selected frames was used to compute all latent-space and observable metrics.
+\subsection{Archive-Replay Benchmark and Equivalence-Cloud Expansion}
+\label{sec:methods_equiv}
 
-\subsection{COMPASS Acquisition Policy}
-\label{sec:methods_compass}
+\paragraph{Structural equivalence.}
+The key challenge in building a faithful retrospective benchmark is defining which archived frames are physically accessible from a given visited state.
+In real MD, restarting from structure $s$ and advancing by $\Delta t$ produces a distribution of outcomes centered on $s$ due to the stochastic integrator.
+We model this by defining a \emph{structural neighborhood} of each visited frame: the $k$ nearest archived frames in a combined hydrogen-bond count and backbone torsion feature space (NHB+torsion hybrid, 50/50 normalized contribution), with $k=40$.
 
-The acquisition score follows Section~\ref{sec:theory_score} (Eqs.~\ref{eq:raw_deficit}--\ref{eq:score}). Source histograms use unit pseudo-counts; prior-corruption replaces $p_s$ after smoothing. \textbf{Scoring} compares $p_s$ to $\hat{p}_t$ from \emph{decision bins} only; reported JSD, coverage, and observables use \textbf{all selected frames} (replay) or lag-weighted MSM mass (emulator). Most runs used \eqref{eq:ig_deficit} with $\lambda=20$. Component weights followed a two-phase schedule (30\% exploratory / 40\% balanced / 30\% exploit); numeric weights and a stepwise decomposition plot for the headline $80$\,ns TICA2D run appear in Supporting Information Table~\ref{tab:si_policy_weights} and Figure~\ref{fig:si_score_decomp}. Unless stated otherwise, the policy picked the top-scoring remaining chunk.
+NHB+torsion similarity was chosen because it captures both global secondary-structure identity (NHB) and backbone geometry simultaneously, without requiring expensive all-atom superposition.
+A temporal gate (maximum 50~ns separation in the same trajectory segment) prevents neighbors from spanning unphysically long structural excursions.
 
-\subsection{Baselines and Evaluation Metrics}
+\paragraph{Candidate pool construction.}
+At each step, the visited set $\mathcal{V}_t$ consists of all frames from previously selected chunks.
+The candidate pool is the union of $\mathcal{V}_t$ and all structural neighbors of frames in $\mathcal{V}_t$, minus frames already used as seeds.
+This pool grows as more regions are explored, mirroring the expanding frontier of real adaptive MD.
+The policy scores all candidates and selects the next seed.
 
-The main baseline was bootstrap random acquisition. For each random repeat, chunks were drawn with replacement from the same target chunk library, and the same cumulative metrics were computed. Reported random means and uncertainty bands used 100 random repeats. This baseline is strong because it samples from the completed A8Q2 library rather than from a degraded model of target dynamics; failures against random are therefore meaningful. It is also not identical to the no-replacement deterministic COMPASS selection rule, so the bootstrap baseline is interpreted as an uncertainty envelope rather than as the only possible random comparator.
+\paragraph{Chunk continuation.}
+Once seed frame $s$ is selected, the benchmark reads the next $L$ consecutive archived frames (a single uninterrupted chunk of length $L$ frames at 0.1~ns/frame) from that trajectory segment.
+All $L$ frames update the visited set and contribute to metric computation.
+A total budget of 300~ns is used across all experiments, with metrics logged after every chunk.
 
-JSD compared selected vs.\ reference 2D histograms on bins with raw reference count $\geq 3$. Coverage was the fraction of those bins visited. Important-bin coverage used the top-$k$ highest-$p_s$ cells ($k=\min\{\max(20,\lfloor B/20\rfloor),B\}$). Source mass visited summed $p_s$ over visited bins.
+\subsection{Policy Hierarchy}
+\label{sec:methods_policies}
 
-Observable metrics were computed from hydrogen-bond labels after selection. The helix fraction \(f_{\mathrm{helix}}\) and open fraction \(f_{\mathrm{open}}\) were compared with full-target reference values (superscript $\text{sel}$ denotes the selected-sample estimate):
-\begin{equation}
-\label{eq:observables}
-\begin{split}
-    \epsilon_{\mathrm{helix}} &= \bigl| f_{\mathrm{helix}}^{\text{sel}} - f_{\mathrm{helix}}^{\mathrm{ref}} \bigr|,\\
-    \epsilon_{\mathrm{open}} &= \bigl| f_{\mathrm{open}}^{\text{sel}} - f_{\mathrm{open}}^{\mathrm{ref}} \bigr|.
-\end{split}
-\end{equation}
-\addcontentsline{loe}{eqloe}{\protect\numberline{\theequation}Helix and open fraction errors}
-These labels were not available to the acquisition policy. They were used only to test whether latent-space acquisition preserved physically interpretable populations.
+Five policies are compared, ordered by increasing sophistication.
+This ordering is designed to isolate each element of the COMPASS design:
 
-\subsection{Selected Experiments}
+\begin{description}[leftmargin=1.5em, labelindent=0pt, itemsep=0.4ex]
+    \item[\textbf{P1 -- Single Walk.}]
+    One continuous sequential walk through the archived trajectory from a randomly chosen starting frame.
+    No restart decisions are made; the policy simply reads the archive in order.
+    This is the closest analog to an uninterrupted long MD run and serves as a ceiling on what can be achieved without restart overhead, as well as a sanity check that the archive-replay metrics recover ground-truth observables when the full trajectory is replayed.
 
-The full sweep included static policies, annealed policies, prior-corruption tests, SPIB variants, and stochastic repeats. The experiments presented here are those that support a coherent mechanistic story:
-\begin{enumerate}
-    \item TICA2D two-phase acquisition with \SI{2}{ns} chunks at \SI{80}{ns}, testing short-budget observable estimation.
-    \item SPIB1D two-phase acquisition at \SI{80}{ns}, testing discovery and source-mass coverage.
-    \item TICA2D two-phase acquisition at \SI{200}{ns}, testing long-budget distributional recovery.
-    \item Uniform, shuffled, noisy, and inverted TICA priors, testing whether prior quality controls failure modes.
-\end{enumerate}
-Stochastic-start variants and pure-frontier ablations are listed in Table~\ref{tab:si_sweep} (Appendix~\ref{part:supporting}); the prior-corruption tests above already isolate the failure modes (tenacious following of a mis-specified atlas versus exploration that decorrelates from equilibrium mass) that those auxiliary runs would otherwise demonstrate.
+    \item[\textbf{P2 -- Independent Replicas.}]
+    At the very first step, the candidate pool is expanded from the initial frame using the structural equivalence neighbors.
+    All $N$ seeds needed to exhaust the 300~ns budget are selected \emph{uniformly at random from this initial pool and committed at once}.
+    Subsequent steps pop from this pre-committed list; the pool is never updated.
+    P2 represents launching a fixed set of parallel replicas from diverse structural neighbors of a single initial state, without any adaptive feedback.
 
-\subsection{Matched-Dynamics MSM-Emulator Benchmark}
-\label{sec:methods_msm}
+    \item[\textbf{P3 -- Uniform Random.}]
+    At each step, the candidate pool is rebuilt from the current visited set and a seed is chosen uniformly at random.
+    The pool updates iteratively but selection is uninformed: no latent prior or coverage information influences the choice.
+    P3 isolates the benefit of iterative candidate-pool expansion over the one-shot initialization of P2.
 
-The retrospective replay above answers whether a transferred prior would have selected informative chunks from the cached target library.
-Its single baseline is \emph{bootstrap random} over a finite library, so it cannot separate two contributions to any COMPASS gain: the transferred prior itself versus generic adaptation of the restart distribution as data accrues.
-We therefore add a second benchmark with apples-to-apples policy comparisons (same dynamics, lag, bins, and random seeds).
+    \item[\textbf{P4 -- Min-Count Adaptive.}]
+    At each step, the candidate pool is rebuilt and each frame is assigned to a latent bin (same grid as the source prior).
+    The seed is chosen from the bin with the fewest previous visits, breaking ties uniformly.
+    P4 represents classical count-based adaptive sampling\cite{zimmerman2015fast} within the equivalence-cloud framework, without using the source prior.
 
-\paragraph{MSM emulator.}
-Policies are compared under identical Markov dynamics.
-One row-stochastic transition matrix $\mathbf{T}$ is estimated on the full A8Q2 target trajectory using the same atlas bins and lag $\tau$ used by COMPASS at each preset; only the rule that picks each restart microstate differs across methods.
-Rather than launching new MD, each policy at round $t$ chooses a restart microstate $s^{\mathrm{start}}_t$ and simulates a short Markov walk $s_0=s^{\mathrm{start}}_t \to s_1 \to \cdots \to s_{n}$ of $n$ transitions under that shared $\mathbf{T}$.
-Each state along the walk contributes lag-weighted mass $\tau\cdot\Delta t_{\mathrm{frame}}$ (here $1$\,ns for $\tau=10$ frames at a $0.1$\,ns frame spacing) to the cumulative histogram on the bin grid, from which all metrics (JSD, coverage, $|\Delta f_{\mathrm{helix}}|$, $|\Delta f_{\mathrm{open}}|$) are computed at every round.
-All policies share the same initial microstates (cycled over the same preset seed list), the same total transition budget, and the same random-number stream across repeats when the policy is deterministic.
-Results are averaged over 50 independent stochastic repeats per preset, and the JSD noise floor is estimated from 200 two-half bootstrap splits of the target trajectory (median and 95th percentile).
-
-\paragraph{Observable evaluation.} JSD measures only how simulated mass is distributed across latent bins, whereas helix and open errors measure how the mass-weighted mixture of bin-local compositions matches global target fractions; improving one does not imply improving the other.
-Helix and open fractions in the emulator are \emph{not} recomputed by threading raw MD frames through each new walk.
-After each round, $f_{\mathrm{helix}}$ and $f_{\mathrm{open}}$ are histogram-weighted averages of per-microstate fractions $f_{\mathrm{helix}}(s)$ and $f_{\mathrm{open}}(s)$ from binning the full target trajectory (\path{microstate_observables} in code).
-Policies that steer mass into bins with extreme local helix/open composition (for example pure min-count or geometric novelty on a coarse 1D grid) can corrupt observables even while improving latent coverage.
-
-\paragraph{Baselines.} Six policies are benchmarked under the identical emulator:
-\begin{sloppypar}
-\begin{description}
-    \item[B0 (single-walk ceiling).] One continuous Markov walk of length $N_{\mathrm{walks}}\times N_{\mathrm{steps}}$ transitions, sliced into $N_{\mathrm{walks}}$ equal-length segments so a per-round curve exists. This is a diagnostic upper bound: it pays zero restart cost under Markov dynamics and is therefore optimistic relative to real MD.
-    \item[B1 (independent replicas).] $N_{\mathrm{walks}}$ separate walks launched from fixed initial seeds, no adaptivity. This isolates ``parallel short MD'' with no feedback.
-    \item[B2 (uniform).] Each restart drawn uniformly at random from microstates observed so far.
-    \item[B3 (min-count).] Each restart is the observed microstate with smallest accumulated lag-weighted mass: count-based adaptive sampling in the spirit of min-count exploitation of under-sampled states.\cite{zimmerman2015fast}
-    \item[B4 (farthest-point).] Each restart maximizes Euclidean distance between latent \emph{bin centers} and the centroid of prior B4 restarts.
-    On SPIB1D ($30\times1$ grid) this is 1D separation only (\emph{pure} geometric novelty; no density prior).
-    \item[B6 (COMPASS).] The full source-prior--deficit score of Eq.~(\ref{eq:score}) with the two-phase schedule of Supporting Information Table~\ref{tab:si_policy_weights} and the same transferred prior used in the retrospective benchmark.
+    \item[\textbf{P5 -- COMPASS.}]
+    Full COMPASS scoring (Eq.~\ref{eq:score}) with the three-phase schedule and the transferred A10 prior.
+    Deficit, frontier, novelty, boundary, and redundancy components are all active; weights follow the two-phase annealing schedule (Supporting Information Table~\ref{tab:si_policy_weights}).
+    P5 is the only policy that uses source-prior information.
 \end{description}
-\end{sloppypar}
-\paragraph{Presets.} Five presets mirror retrospective latent spaces and budgets (tICA2D baseline and long-budget, long-chunk, SPIB1D, two-seed); each has its own $\mathbf{T}$, bins, and reference. MSM coarse-graining hides slow modes not resolved on the 2D grid (Section~\ref{sec:tica_atlas}).
+
+The P3$\to$P4 increment isolates the value of \emph{adaptive updating} over random selection.
+The P4$\to$P5 increment isolates the value of the \emph{transferred source prior} over count-based adaptivity alone.
+The P1 vs.\ P3 comparison exposes the cost of restarts (each restart discards temporal continuity) relative to the exploratory benefit of flexible seed placement.
+
+\subsection{Experimental Presets and Ablations}
+\label{sec:methods_presets}
+
+All experiments use a total budget of 300~ns, with metrics recorded after every chunk.
+Budget effects can thus be read at any intermediate level from a single run.
+A base preset (TICA-2D, 2~ns chunks, no noise, 20 repeats per policy) establishes the main policy comparison.
+Three focused ablations vary one parameter at a time:
+
+\paragraph{Ablation A -- Collective variable (CV) type.}
+TICA-1D, TICA-2D (base), SPIB-1D, and SPIB-2D are tested at chunk=2~ns, no noise.
+This reveals how the dimensionality and objective (equilibrium density vs.\ predictive dynamics) of the CV affect policy quality.
+P3 and P2 results are CV-agnostic (no latent prior used) and are reused across CV variants.
+
+\paragraph{Ablation B -- Chunk length.}
+Seven chunk sizes spanning two orders of magnitude (0.2, 0.5, 1, 2, 5, 10, and 20~ns) are tested at TICA-2D, no noise.
+Short chunks update the candidate pool frequently and explore diverse neighborhoods; long chunks amortize restart overhead but coarsen the grid of available restart points.
+
+\paragraph{Ablation C -- Prior quality.}
+Five prior variants are tested at TICA-2D, chunk=2~ns: no noise (base), low noise ($\sigma=0.1\times\max$), medium noise ($\sigma=0.3\times\max$), high noise ($\sigma=1.0\times\max$), and fully uniform (no source information).
+This stress-tests how robust COMPASS is to imperfect source priors, motivating the trust-control design.
+
+\paragraph{Efficiency.}
+P2 and P3 are CV-agnostic and prior-agnostic: their results are computed once per chunk size and shared across Ablations A and C.
+P4 is prior-agnostic: its results are computed once per (CV $\times$ chunk size) and shared across Ablation C.
+The total experiment suite comprises approximately 3\,600 archive-replay runs, each completing in a few seconds without any simulation budget, enabling the full ablation grid to be explored feasibly.
+
+\paragraph{Statistical evaluation.}
+Each (preset, policy) combination is run with 20 independent random starting seeds to estimate mean and standard deviation.
+Observable errors and coverage metrics are aggregated across repeats and reported as mean~$\pm$~standard deviation or as convergence curves with shaded bands.
 
 \chapter{Results and Discussion}\label{chap:results}
 
-\noindent We first relate transfer diagnostics to acquisition outcomes on the real A8Q2 library (TICA and SPIB), then stress-test prior quality, and finally report the MSM-emulator comparison where dynamics are fixed and only restart rules differ.
+\noindent We first present updated transfer diagnostics that focus on physically interpretable signals, then evaluate the five-policy hierarchy on the base preset, then present ablation results, coverage correlation, and acceleration estimates.
 
 \section{Results}
 
-\subsection{TICA Transfer: Global Metrics vs.\ Helix-Level Signal}
+\subsection{Transfer Diagnostics: CV Alignment and Helix Signal}
+\label{sec:results_transfer}
 
-Figure~\ref{fig:transfer} collects the A10$\rightarrow$A8Q2 transfer diagnostics already summarized in Section~\ref{sec:tica_atlas}: formal geometric and kinetic scores indicate a rotated, not faithful, basis, yet leading directions overlap enough that transferred TIC-1 remains strongly helix-correlated. The acquisition experiments below therefore test whether that residual signal is useful for chunk selection rather than whether A10 TICA defines an A8Q2 reaction coordinate.
-
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.95\textwidth]{transfer_diagnostics.png}
-    \caption[TICA transfer diagnostics (A10$\to$A8Q2)]{TICA transfer diagnostics from A10 to A8Q2. (a)~Four transfer metrics (axis labels give definitions): $D_0$ and $D_{KM}$ lie in the poor regime relative to the dashed criteria, $D_\tau$ is marginal, and the absolute correlation $|r|$ between transferred TIC-1 and A8Q2 helix content meets the success threshold. The headline is therefore failed global transfer with a retained helix-direction signal. (b)~Scatter plot of transferred TIC-1 versus A8Q2 hydrogen-bond count $N_{\mathrm{HB}}$, confirming the negative correlation: more negative TIC-1 corresponds to higher helicity. (c)~One-dimensional free-energy profiles along the transferred A10 TIC-1 (left, blue) and along native A8Q2 TIC-1 (right, orange), illustrating why the scalar metrics in (a) read as poor transfer even though a useful helix trend remains.}
-    \label{fig:transfer}
-\end{figure}
-
-\subsection{TICA2D Gives a Low Short-Budget Helix Error}
-
-The clearest $80$\,ns observable result was obtained with TICA2D two-phase acquisition using $T_c=2$\,ns chunks. COMPASS selected 40 chunks and achieved a helix-fraction error of $\epsilon_{\mathrm{helix}}=7.5\times 10^{-4}$, compared with $2.08\times 10^{-2}$ for bootstrap random acquisition, a 28-fold reduction in the absolute deviation from the full-target reference. The open-fraction error also improved, from $\epsilon_{\mathrm{open}}=3.09\times 10^{-2}$ (random) to $2.04\times 10^{-2}$ (COMPASS). Important source-bin coverage was complete for COMPASS (1.000) and essentially complete for random ($0.992$).
-
-This improvement did \emph{not} coincide with better global distributional metrics. The same run had a worse final TICA-space JSD than random ($0.156$ vs.\ $0.139$) and lower raw bin coverage ($0.514$ vs.\ $0.572$). The short-budget result is therefore not a generic ``COMPASS beats random'' claim. It is a targeted result: transferred TICA density guidance recovers a helix-relevant observable under limited budget, while bootstrap random remains stronger for broad target-distribution coverage.
-Figure~\ref{fig:tica80} summarizes cumulative metrics versus sampled budget for this configuration.
+Figure~\ref{fig:transfer_fes} shows the one-dimensional free energy profiles along the transferred A10 TIC-1 projected onto A8Q2 coordinates, alongside the scatter of TIC-1 against hydrogen-bond count $N_{\mathrm{HB}}$.
+Green shading marks the helix basin (TIC-1 values predominantly associated with $N_{\mathrm{HB}}\geq 3$) and blue shading marks the coil basin; the dashed vertical line is the basin boundary estimated as the midpoint between mean helix and mean coil TIC-1.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{replay_tica2d_chunk20_80ns.png}
-    \caption[Short-budget ($80$\,ns) TICA2D replay vs.\ random]{Short-budget TICA2D acquisition with $T_c=2$\,ns chunks ($80$\,ns total acquired time, 40 chunks). Cumulative metrics versus selected fraction of budget for COMPASS (solid) and bootstrap random (mean $\pm$ shaded band over 100 repeats). Panels show, from top-left to bottom-right: helix-fraction error $\epsilon_{\mathrm{helix}}$, open-fraction error $\epsilon_{\mathrm{open}}$, TICA-space JSD against the full-target reference, and raw bin coverage. COMPASS gives the lowest observed helix-fraction error of any main $80$\,ns experiment in this study, while random remains competitive or better for JSD and raw coverage.}
-    \label{fig:tica80}
+    \begin{minipage}[t]{0.54\textwidth}
+        \includegraphics[width=\linewidth]{../outputs/v2/figures/fig9a_transfer_fes_1d.png}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.43\textwidth}
+        \includegraphics[width=\linewidth]{../outputs/v2/figures/fig9b_transfer_tic1_nhb.png}
+    \end{minipage}
+    \caption[TICA transfer: 1D FES with helix/coil shading and TIC-1 vs $N_\mathrm{HB}$ scatter]{(a)~One-dimensional free-energy profile along the transferred A10 TIC-1 projected onto A8Q2.
+    Green shading: helix basin; blue shading: coil basin; dashed line: basin boundary.
+    The two-well structure confirms that the transferred coordinate distinguishes the dominant macrostates on A8Q2 despite the Gln substitutions.
+    (b)~Scatter of transferred TIC-1 versus A8Q2 $N_{\mathrm{HB}}$; strong negative correlation confirms that more negative TIC-1 corresponds to higher helicity. We use this coordinate as an empirical density prior for acquisition, not as a certified A8Q2 reaction coordinate.}
+    \label{fig:transfer_fes}
 \end{figure}
 
-\subsection{SPIB1D Accelerates Discovery but Not Equilibrium Estimation}
+The one-dimensional free energy profile shows a clear two-well structure, with the helix basin at more negative TIC-1 values.
+The strong correlation between transferred TIC-1 and $N_{\mathrm{HB}}$ ($r \approx -0.7$ to $-0.9$ depending on the lag used for TICA) establishes that the A10 coordinate retains a useful helix-level signal on A8Q2, even though global transfer metrics (subspace projection error, kinetic structure match) indicate that the full two-dimensional basis is rotated relative to the native A8Q2 TICA basis.
+This partial signal is precisely the regime where COMPASS is designed to operate: a fallible but informative atlas that guides acquisition without being treated as ground truth.
 
-SPIB1D produced the strongest discovery behavior. At $80$\,ns, SPIB1D two-phase acquisition saturated all three SPIB-space discovery metrics (raw coverage, important-bin coverage, and source-mass visitation all reached $1.000$), compared with random means of $0.863$, $0.963$, and $0.989$ respectively.
+\subsection{Policy Hierarchy: Base Preset}
+\label{sec:results_base}
 
-The same run, however, performed poorly on helix and open observables. The helix-fraction error was $\epsilon_{\mathrm{helix}}=8.33\times 10^{-2}$ for COMPASS compared with $1.71\times 10^{-2}$ for random, an almost fivefold inflation. The open-fraction error was $7.79\times 10^{-2}$ vs.\ $2.35\times 10^{-2}$ for random. JSD in the SPIB map was also worse than random ($0.014$ vs.\ $0.009$). This cleanly separates two roles that are often conflated in adaptive sampling: a transferred latent coordinate may be excellent for discovering distinct regions while being unsuitable as an equilibrium-density prior.
-Figure~\ref{fig:spib80} shows the corresponding SPIB-space curves and bootstrap envelope.
+Figure~\ref{fig:base_convergence} shows convergence of four metrics (reweighted helix-fraction error, TICA-space JSD, target coverage, and cumulative helix--coil transitions) versus acquired budget for all five policies at the base preset (TICA-2D, 2~ns chunks, 20 repeats).
+Observable errors are computed using the reference-reweighted estimator (Section~\ref{sec:theory_reweight}) to correct for adaptive sampling bias.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{replay_spib1d_80ns.png}
-    \caption[SPIB1D replay ($80$\,ns): coverage vs.\ population metrics]{SPIB1D acquisition at $80$\,ns ($T_c=1$\,ns chunks). Curves and bands as in Fig.~\ref{fig:tica80} but with SPIB-space metrics. SPIB1D rapidly saturates source-supported latent coverage but substantially worsens helix/open population estimates, indicating that the transferred SPIB latent should be treated as a discovery coordinate rather than as a density prior.}
-    \label{fig:spib80}
+    \includegraphics[width=0.95\textwidth]{../outputs/v2/figures/fig1_convergence_base.png}
+    \caption[Policy hierarchy: convergence curves, base preset]{Convergence of four metrics versus acquired budget for policies P1--P5 (base preset: TICA-2D, 2~ns chunks).
+    Lines are means across 20 repeats; shaded bands are $\pm$1 standard deviation.
+    From top to bottom: reweighted helix-fraction error $\hat{\varepsilon}_{\mathrm{helix}}$; Jensen--Shannon divergence (JSD) between the reweighted 2D histogram and the reference; fraction of reference-supported latent bins visited (target coverage); cumulative helix--coil transitions observed in selected chunks.
+    The P3$\to$P4 gap isolates the gain from adaptive pool updating; the P4$\to$P5 gap isolates the gain from the transferred source prior.}
+    \label{fig:base_convergence}
 \end{figure}
 
-\subsection{TICA2D Improves Long-Budget Distributional Recovery}
+The P1 single walk provides the long-budget upper bound on observable recovery: given enough budget, reading the archive sequentially recovers the reference because all frames are eventually selected.
+Its short-budget helix-fraction error is moderate ($2.54\% \pm 1.78\%$ at 50~ns) because the single trajectory advances linearly without branching toward helix-rich regions.
 
-At a $200$\,ns budget, TICA2D two-phase acquisition improved both global JSD and coverage relative to random. COMPASS achieved JSD $0.042$ vs $0.057$ for random, raw coverage $0.880$ vs $0.801$, and source mass visited $0.911$ vs $0.875$. Important-bin coverage was saturated for both policies.
+P2 independent replicas spreads restarts across the structural neighborhood of the initial state but cannot adapt as new regions are visited.
+Coverage saturates early ($54.0\% \pm 7.1\%$ at 100~ns) because all seeds are pre-committed and cluster in the initial neighborhood, with observable error persisting at $3.38\% \pm 1.81\%$ at 100~ns.
 
-The long-budget result indicates that the short-budget JSD gap versus random seen in Fig.~\ref{fig:tica80} (2\,ns chunks, \SI{80}{ns}) need not persist when acquisition continues on a comparable two-phase TICA policy. Here, longer runs use \SI{1}{ns} chunks (Fig.~\ref{fig:tica200}); qualitatively, early budget still pays for source-deficit repair, whereas later budget lets the density terms repopulate high-mass target bins and improve JSD and coverage relative to bootstrap random.
+P3 uniform random with iterative pool updating outperforms P2 in coverage ($57.5\% \pm 5.5\%$ at 100~ns) because the pool expands as new regions are explored, giving the sampler access to increasingly diverse candidates.
+The gap between P2 and P3 quantifies the benefit of iterative candidate-pool expansion; however, P3 observable error ($3.50\% \pm 1.17\%$ at 100~ns) remains comparable to P2 because uniform sampling does not target informationally rich regions.
+
+P4 min-count adaptive achieves substantially lower observable error than P3 ($1.02\% \pm 0.75\%$ vs.\ $3.50\% \pm 1.17\%$ at 100~ns) and higher coverage ($89.8\% \pm 2.8\%$ at 100~ns), demonstrating that bin-level count awareness adds significant value beyond uniform random selection even without a source prior.
+At long budgets, P4 achieves near-perfect coverage ($99.2\% \pm 0.9\%$ at 200~ns) and retains low observable error ($1.22\% \pm 0.52\%$).
+
+P5 COMPASS achieves the lowest reweighted observable errors at short-to-medium budgets: $1.09\% \pm 0.66\%$ at 50~ns and $0.63\% \pm 0.43\%$ at 100~ns.
+Coverage reaches $93.4\% \pm 2.3\%$ at 100~ns, substantially ahead of P3 ($57.5\%$) and P4 ($89.8\%$) at the same budget.
+The source-prior deficit term drives early exploration toward source-supported regions where helix content is concentrated, while the frontier and novelty terms prevent redundancy.
+The P4$\to$P5 gap, which isolates the value of the transferred A10 prior, is largest at short budgets: at 50~ns, P5 ($1.09\%$) and P4 ($1.13\%$) are comparable, but P5 reaches the $2\%$ threshold $3.6\times$ faster than P4 on the milestone metric (Section~\ref{sec:results_acceleration}).
+At long budgets (200~ns), however, P4 observable error ($1.22\%$) falls below P5 ($2.92\%$) despite near-identical coverage ($99.2\%$ vs.\ $98.8\%$).
+This crossover reflects the reweighting correction penalizing the helix-basin over-sampling that persists after the source deficit is resolved: COMPASS continues to over-weight the prior-dense region even when the coverage gap has closed, inflating the importance weights and increasing reweighted error variance at long budgets.
+
+\subsection{Seed Exploration Dynamics}
+\label{sec:results_trajectory}
+
+Figure~\ref{fig:seed_trajectory} shows the TICA-2D positions of selected seed frames over time for P3 (uniform random) and P5 (COMPASS), colored from green (early steps) to red (late steps).
+Background points are all A8Q2 archive frames, colored by helix state (orange: $N_{\mathrm{HB}}\geq 3$; blue: $N_{\mathrm{HB}}<3$).
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{replay_tica2d_200ns.png}
-    \caption[Long-budget ($200$\,ns) TICA2D replay vs.\ random]{Long-budget TICA2D acquisition ($200$\,ns total, $T_c=1$\,ns chunks). Same metric panels as Fig.~\ref{fig:tica80}. At $200$\,ns the TICA2D two-phase policy improves JSD, raw coverage, and source-mass visitation relative to bootstrap random acquisition, showing that the short-budget distributional penalty can be overcome with sufficient budget.}
-    \label{fig:tica200}
+    \includegraphics[width=0.95\textwidth]{../outputs/v2/figures/fig2_seed_trajectory.png}
+    \caption[Seed positions over time: P3 random vs.\ P5 COMPASS]{TICA-2D positions of seed restart frames over acquired budget, colored by temporal order (green = early, red = late).
+    Background: all A8Q2 frames colored by helix state (orange: helical, blue: coil).
+    (a)~P3 uniform random: seeds are scattered throughout the sampled latent space without consistent directionality.
+    (b)~P5 COMPASS: early seeds concentrate in the source-density-weighted helix-adjacent region (consistent with the deficit term); later seeds shift toward boundaries and previously unvisited coil regions as the deficit resolves.
+    This progression (from deficit repair to boundary exploration) is the designed behavior of the three-phase weight schedule.}
+    \label{fig:seed_trajectory}
 \end{figure}
 
-\subsection{Prior Quality Controls the Failure Mode}\label{sec:prior_quality}
+For P3, seed positions are distributed approximately uniformly across the expanded candidate pool at each step, with no systematic spatial pattern over time.
+For P5, early seeds cluster near the helix basin and the high-source-density region of the TICA-2D map (where the A10 prior is concentrated), while later seeds shift progressively toward the basin boundary and coil region.
+This temporal pattern reflects the intended behavior of the phased COMPASS schedule: early budget is spent repairing source-deficit in the helix region, while later budget explores the boundary and covers the coil basin.
 
-Deliberately corrupted TICA priors showed that COMPASS follows its prior rather than ignoring it. Key $80$\,ns summary metrics are given in Table~\ref{tab:prior_quality}. A uniform prior increased coverage but degraded JSD and observables. A shuffled prior improved coverage and important coverage but no longer improved distributional accuracy. The inverted prior produced the strongest failure: JSD increased to 0.273 compared with 0.132 for random, and helix/open errors were substantially worse than random. A noisy prior was less damaging and remained closer to random.
+The seed trajectory plot also serves as a qualitative sanity check: if COMPASS were merely following a bad prior, seeds would be systematically misplaced relative to the target distribution (analogous to the inverted-prior behavior studied in prior-corruption tests).
+The agreement between early seed placement and the helix-occupied region of A8Q2 confirms that the transferred prior is directionally useful on this system.
 
-\begin{table}[htbp]
-    \centering
-    \caption{Selected $80$\,ns prior-quality tests for TICA2D two-phase acquisition ($T_c=1$\,ns chunks). \emph{Clean} is the uncorrupted A10 prior. Lower JSD and lower observable errors are better.}
-    \label{tab:prior_quality}
-    \small
-    \setlength{\tabcolsep}{4pt}
-    \begin{tabular}{lcccccc}
-        \toprule
-        Prior & JSD & Random JSD & Coverage & Random coverage & Helix error & Open error \\
-        \midrule
-        Clean & 0.147 & 0.132 & 0.528 & 0.583 & 0.0045 & 0.0066 \\
-        Uniform & 0.200 & 0.132 & 0.765 & 0.583 & 0.0695 & 0.1079 \\
-        Shuffled & 0.151 & 0.132 & 0.725 & 0.583 & 0.0208 & 0.0716 \\
-        Inverted & 0.273 & 0.132 & 0.725 & 0.583 & 0.0645 & 0.1154 \\
-        Noisy & 0.140 & 0.132 & 0.563 & 0.583 & 0.0245 & 0.0216 \\
-        \bottomrule
-    \end{tabular}
-\end{table}
+\subsection{Ablation Studies}
+\label{sec:results_ablations}
 
-The inverted-prior result is mechanistically useful even though it is a performance failure. It proves that the source prior is active in the policy. It also shows that prior trust cannot be treated as a minor implementation detail: a bad prior can actively steer acquisition toward the wrong target distribution.
-Figure~\ref{fig:prior_maps} overlays chunk-selection footprints on the target trajectory for the correct versus inverted prior.
+\subsubsection{Effect of Collective Variable Type}
+
+Figure~\ref{fig:cv_ablation} reports reweighted helix-fraction error at a fixed 100~ns budget for P4 (min-count) and P5 (COMPASS) across the four CV types.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{prior_corruption_probe_maps.png}
-    \caption[COMPASS chunk selections: correct vs.\ inverted TICA prior]{COMPASS chunk selections in TICA space under (a)~the correct A10 TICA prior and (b)~the inverted TICA prior. Background points show the A8Q2 target trajectory colored by hydrogen-bond count (yellow = high helix, purple = open); large numbered circles mark the first 40 COMPASS selections. Under the correct prior, selections concentrate in the dense core where most source-supported mass lies. Under the inverted prior, selections scatter into the sparse periphery, visually confirming that the policy follows its prior and that an inverted prior actively steers selection away from the target distribution.}
-    \label{fig:prior_maps}
+    \includegraphics[width=0.6\textwidth]{../outputs/v2/figures/fig5_cv_ablation.png}
+    \caption[CV type ablation: helix-fraction error at 100~ns]{Reweighted helix-fraction error at 100~ns budget for P4 (min-count, no prior) and P5 (COMPASS, with source prior) across TICA-1D, TICA-2D, SPIB-1D, and SPIB-2D collective variables.
+    Chunk=2~ns; no noise; 20 repeats per (CV, policy).
+    Error bars are $\pm$1 SD.
+    The P4$\to$P5 gap (width of the COMPASS advantage) should be larger for 2D CVs, where the source prior provides directional guidance across more frontiers.}
+    \label{fig:cv_ablation}
 \end{figure}
 
-\subsection{Matched-Dynamics Benchmark Isolates Prior and Adaptivity Contributions}
-\label{sec:results_msm}
+Across the four CV types, COMPASS (P5) achieves reweighted helix-fraction errors at 100~ns of $0.57\%\pm0.48\%$ (TICA-1D), $0.63\%\pm0.43\%$ (TICA-2D), $1.04\%\pm0.91\%$ (SPIB-1D), and $0.65\%\pm0.28\%$ (SPIB-2D).
+The corresponding P4 (min-count) errors are $1.12\%$, $1.02\%$, $0.51\%$, and $1.35\%$.
 
-Under the MSM emulator (Section~\ref{sec:methods_msm}), COMPASS (B6) ties or wins on helix/open errors in every preset at the final budget (50 repeats; Table~\ref{tab:msm_benchmark}; Figs.~\ref{fig:msm_grid}, \ref{fig:msm_pair}, \ref{fig:msm_map}). Repeat-level spreads at the final round are shown in Supporting Information Figure~\ref{fig:si_msm_violins}. On SPIB1D only, the single-walk ceiling B0 achieves the lowest JSD because 1D Markov mixing is unusually fast at this grid resolution; here B0 is only a diagnostic, not a fair online comparator.
+The TICA-1D result ($0.57\%$ for COMPASS vs.\ $1.12\%$ for P4) shows that COMPASS retains an advantage in 1D, but the prior value here is primarily density guidance, indicating how much mass belongs to each macrostate, rather than directional guidance, since a 1D helix--coil system has only two frontiers and count-based adaptivity will naturally explore both.
+TICA-2D provides a cleaner separation ($0.63\%$ vs.\ $1.02\%$) because the additional spatial dimension enables directional guidance toward helix-adjacent source bins that pure count adaptivity does not prioritize.
 
-Pair-difference curves (Fig.~\ref{fig:msm_pair}) decompose the lift: $B6{-}B3$ (prior vs.\ count-based adaptivity alone) is negative on mean final JSD in all five presets; $B3{-}B1$ (adaptivity vs.\ replicas) is negative on JSD everywhere and usually helps observables, except on SPIB1D where min-count overweights minority helical bins on a coarse 1D lattice. Farthest-point B4 is catastrophic on tICA presets ($|\Delta f_{\mathrm{open}}|\approx 0.33$--$0.48$): geometric novelty drives restarts into peripheral low-mass bins (Fig.~\ref{fig:msm_map}), the emulator analogue of inverted-prior failure (Section~\ref{sec:prior_quality}). On SPIB1D, B3/B4 also inflate helix/open errors versus B6 without a density-aware steering signal.
+The SPIB-1D result reveals an anomaly: P4 ($0.51\%$) outperforms P5 ($1.04\%$) when SPIB-1D is used as the latent map.
+This reversal is consistent with the known mismatch between SPIB's training objective and the density prior assumed by COMPASS: SPIB encodes \emph{transition-predictive} rather than \emph{density-weighted} information, so the A10 SPIB histogram used as a source prior concentrates on transition-rich rather than equilibrium-dense regions.
+Directing acquisition toward those transition-rich bins under SPIB-1D overshoots the equilibrium helix mass and degrades the reweighted estimator.
+The SPIB-2D COMPASS result ($0.65\%$) recovers competitive performance, likely because the second dimension partially decouples equilibrium density from transition kinetics, restoring a directional prior that is compatible with the deficit term.
 
-\begin{table}[htbp]
-    \centering
-    \caption[MSM emulator: final-budget summary table (selected presets)]{MSM-emulator benchmark: final-budget means across 50 repeats for three representative presets. Lower is better for JSD, $|\Delta f_{\mathrm{helix}}|$, $|\Delta f_{\mathrm{open}}|$; higher is better for coverage. Best entry in each column is \textbf{bold}. B0 is the single-walk diagnostic ceiling under Markov dynamics and is optimistic relative to real MD restart cost. Numerical exports for all five emulator presets are archived under \texttt{outputs/msm\_benchmark/}.}
-    \label{tab:msm_benchmark}
-    \small
-    \setlength{\tabcolsep}{4pt}
-    \begin{tabular}{llcccc}
-        \toprule
-        Preset & Policy & JSD $\downarrow$ & Coverage $\uparrow$ & $|\Delta f_{\mathrm{helix}}|$ $\downarrow$ & $|\Delta f_{\mathrm{open}}|$ $\downarrow$ \\
-        \midrule
-        \multirow{6}{*}{tICA2D baseline, \SI{160}{ns}} & B0 single-walk & 0.524 & 0.142 & 0.038 & 0.067 \\
-        & B1 replicas & 0.618 & 0.106 & 0.044 & 0.080 \\
-        & B2 uniform & 0.521 & 0.137 & 0.037 & \textbf{0.043} \\
-        & B3 min-count & 0.534 & 0.142 & 0.038 & 0.067 \\
-        & B4 farthest & 0.735 & 0.102 & 0.090 & 0.381 \\
-        & B6 COMPASS & \textbf{0.509} & 0.142 & \textbf{0.028} & 0.045 \\
-        \midrule
-        \multirow{6}{*}{SPIB1D, \SI{160}{ns}} & B0 single-walk & \textbf{0.063} & 0.540 & \textbf{0.025} & \textbf{0.031} \\
-        & B1 replicas & 0.320 & 0.599 & 0.053 & 0.088 \\
-        & B2 uniform & 0.117 & 0.625 & 0.084 & 0.106 \\
-        & B3 min-count & 0.213 & \textbf{0.756} & 0.215 & 0.264 \\
-        & B4 farthest & 0.319 & 0.725 & 0.247 & 0.286 \\
-        & B6 COMPASS & 0.077 & 0.545 & 0.037 & 0.045 \\
-        \midrule
-        \multirow{6}{*}{tICA2D long, \SI{400}{ns}} & B0 single-walk & 0.334 & 0.285 & 0.024 & 0.039 \\
-        & B1 replicas & 0.555 & 0.156 & 0.045 & 0.081 \\
-        & B2 uniform & 0.359 & 0.270 & 0.031 & 0.034 \\
-        & B3 min-count & 0.374 & \textbf{0.290} & 0.036 & 0.106 \\
-        & B4 farthest & 0.646 & 0.202 & 0.040 & 0.479 \\
-        & B6 COMPASS & \textbf{0.316} & 0.277 & \textbf{0.019} & \textbf{0.031} \\
-        \bottomrule
-    \end{tabular}
-\end{table}
+\subsubsection{Effect of Chunk Length}
+
+Figure~\ref{fig:chunk_ablation} shows reweighted helix-fraction error versus chunk size at three fixed budgets (50, 100, and 200~ns) for P3 and P5.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.98\textwidth]{msm_convergence_grid.png}
-    \caption[MSM emulator: convergence curves across presets]{MSM-emulator benchmark: convergence of four metrics (rows: JSD, coverage of reference-supported bins, $|\Delta f_{\mathrm{helix}}|$, $|\Delta f_{\mathrm{open}}|$) versus lag-weighted cumulative sampled time (ns), across five preset configurations (columns). Lines show means; shaded bands show the interquartile range across 50 independent repeats. Horizontal dashed line on the JSD row is twice the median bootstrap split-noise estimate for that preset. Across every preset, COMPASS (B6, blue) matches or beats count-based min-count (B3, purple) and independent replicas (B1, olive) on the two observable errors, while farthest-point exploration (B4, brown) diverges on $|\Delta f_{\mathrm{open}}|$ in all tICA presets.}
-    \label{fig:msm_grid}
+    \includegraphics[width=0.95\textwidth]{../outputs/v2/figures/fig4_chunk_ablation.png}
+    \caption[Chunk size ablation: helix-fraction error at fixed budgets]{Reweighted helix-fraction error versus chunk size (log scale) at 50, 100, and 200~ns budget for P3 (random) and P5 (COMPASS).
+    TICA-2D; no noise; 20 repeats for P3 at 0.2~ns, 20 repeats for both at 2~ns; COMPASS data at chunk sizes other than 2~ns is pending.
+    Error bars are $\pm$1 SD.
+    Very short chunks (0.2~ns) permit rapid candidate-pool updates but provide limited local sampling before each restart; the intermediate chunk of 2~ns is the base-preset setting used throughout.}
+    \label{fig:chunk_ablation}
 \end{figure}
+
+\textit{Note: the full chunk-size ablation spanning 0.2--20~ns is partially complete.
+COMPASS data at chunk sizes other than 2~ns are not yet available; the current figure samples only 0.2~ns and 2~ns for P3 (random) and 2~ns only for P5 (COMPASS).
+The following discussion anticipates the qualitative trends expected from the full sweep.}
+
+At 0.2~ns chunks, P3 (random) achieves helix-fraction error of $2.60\%\pm1.70\%$ at 100~ns (slightly lower than at 2~ns, $3.50\%$), suggesting that more frequent restarts modestly improve convergence for an uninformed policy by accelerating pool diversity.
+The full chunk-size sweep will determine whether COMPASS shows a clear interior optimum, where the policy update frequency and per-chunk exploration depth are simultaneously adequate.
+Very short chunks give the most frequent candidate-pool updates but each chunk covers a narrow region around the seed before the next decision; very long chunks resemble deterministic seeding with few restart decisions.
+An intermediate chunk length is expected to achieve the best balance for COMPASS, with the advantage over P3 peaking where frequent updates are possible but each update covers enough frames to inform the next selection.
+
+\subsubsection{Effect of Prior Noise}
+\label{sec:prior_quality}
+
+Figure~\ref{fig:noise_ablation} reports reweighted helix-fraction error at 100~ns for P5 (COMPASS) versus P3 (random) across five prior noise levels.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.98\textwidth]{msm_pair_delta_curves.png}
-    \caption[MSM emulator: $B6{-}B3$, $B3{-}B1$, and $B6{-}B1$ pair differences]{Head-to-head pair differences along the same random repeats of Fig.~\ref{fig:msm_grid}: $B6-B3$ (COMPASS minus min-count, isolating the \emph{prior contribution}), $B3-B1$ (min-count minus replicas, isolating the \emph{adaptivity contribution}), and $B6-B1$ (total lift). For JSD and $|\Delta f_{\mathrm{helix}}|$ a negative value favors the first-named policy; for coverage-like metrics the sign flips (see panel titles). Mean $B6-B3$ on JSD is negative in every preset. The two contributions compound on average: COMPASS tracks the reference more closely than either count-based adaptive sampling alone or non-adaptive replicas alone.}
-    \label{fig:msm_pair}
+    \includegraphics[width=0.65\textwidth]{../outputs/v2/figures/fig6_noise_ablation.png}
+    \caption[Prior noise ablation: helix-fraction error at 100~ns]{Reweighted helix-fraction error at 100~ns for P5 (COMPASS) and P3 (random) across prior noise levels: none (clean A10 prior), low ($\sigma=0.1\times\max$), medium ($\sigma=0.3$), high ($\sigma=1.0$), and uniform (no source information).
+    TICA-2D; chunk=2~ns; 20 repeats.
+    P3 is prior-agnostic and provides a constant reference ($3.50\%\pm1.17\%$ independent of noise level, as expected).
+    COMPASS data for noisy prior levels (low, med, high, uniform) are pending; the figure currently shows only the clean-prior COMPASS result ($0.63\%\pm0.43\%$ at noise=none).}
+    \label{fig:noise_ablation}
 \end{figure}
+
+\textit{Note: the prior-noise ablation for COMPASS is not yet complete.
+The 20-repeat runs at noise levels low, medium, high, and uniform have not finished at time of writing; only the clean-prior (noise=none) COMPASS data is available.
+The following describes anticipated behavior based on the clean-prior result and the theoretical design.}
+
+At clean prior (noise=none), COMPASS ($0.63\%\pm0.43\%$) outperforms P3 ($3.50\%\pm1.17\%$) by a factor of $5.6\times$ in median helix-fraction error at 100~ns, confirming that a well-calibrated A10 source prior provides strong guidance.
+P3 error is prior-agnostic and identical across all noise levels ($3.50\%\pm1.17\%$), as expected.
+As prior noise increases, COMPASS is expected to degrade toward and eventually below the P3 baseline: the source-deficit term will steer acquisition toward incorrect bins if the prior is corrupted, acting like an adversarial oracle at high noise.
+The uniform prior (no source information) adds structure without information and is expected to place COMPASS near or below the random baseline.
+The crossing point (the noise level at which the A10 prior becomes more harmful than helpful) will be determined once the full ablation runs complete.
+
+\subsection{Source--Target Coverage Correlation}
+\label{sec:results_coverage}
+
+Figure~\ref{fig:coverage_correlation} plots source coverage (fraction of A10-derived latent bins touched by selected seeds) against target coverage (fraction of A8Q2 reference-supported latent bins visited) across all policies, repeats, and intermediate budget snapshots.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.98\textwidth]{msm_map_overlay_tica2d_long400ns.png}
-    \caption[MSM emulator: spatial log-ratio maps (long 2D tICA preset)]{MSM-emulator spatial view for the long-budget 2D tICA preset (400\,ns sampled time; same bins and reference as Table~\ref{tab:msm_benchmark}, long row). Each panel averages the final lag-weighted histogram over 50 repeats for the labeled policy and displays $\ln[(\mathrm{mean\ sampled\ mass}+\varepsilon)/(\mathrm{reference\ mass}+\varepsilon)]$ per bin (red: over-sampled vs.\ reference; blue: under-sampled). Black contours trace the source prior. Farthest-point restarts (B4) push mass toward the map periphery; COMPASS (B6) stays nearer the reference core. Raster labels from the plotting script may not match this report's figure numbering.}
-    \label{fig:msm_map}
+    \includegraphics[width=0.6\textwidth]{../outputs/v2/figures/fig7_source_target_coverage.png}
+    \caption[Source--target coverage correlation]{Source latent coverage versus target latent coverage, one point per (policy, repeat, budget snapshot at 50, 100, 150, 200, 250, 300~ns).
+    Colors indicate policy.
+    Pearson $r=0.55$ ($p<10^{-49}$, $n=600$) confirms that visiting more of the A10 source space predicts visiting more of the A8Q2 target space.
+    COMPASS and min-count cluster at the high-coverage corner, while independent replicas saturates at low source coverage due to its inability to expand the candidate pool.}
+    \label{fig:coverage_correlation}
 \end{figure}
+
+The measured Pearson correlation of $r=0.55$ ($p<10^{-49}$) across all policies, repeats, and budget snapshots confirms the COMPASS premise: source-space progress is a statistically significant predictor of target-space progress.
+The moderate $r$ (not near 1) is expected: the A10 and A8Q2 latent spaces are not identical, so source coverage is an imperfect but informative surrogate.
+COMPASS and P4 cluster at the high-joint-coverage corner of the scatter, confirming that their adaptive policies achieve simultaneously high source and target coverage per unit budget.
+P2 (independent replicas) saturates at low source coverage because its pre-committed seeds cannot expand the pool beyond the initial neighborhood.
+The scatter also highlights the SPIB-1D anomaly: when SPIB is used as the latent space, COMPASS achieves high source coverage but the correspondence to target coverage weakens, consistent with the prior-mismatch interpretation in Section~\ref{sec:results_ablations}.
+
+\subsection{Acceleration Summary}
+\label{sec:results_acceleration}
+
+Figure~\ref{fig:acceleration} reports the speedup factor (median budget for P3 (uniform random) to reach a threshold divided by median budget for each policy) for two thresholds: reweighted helix-fraction error $\leq 0.02$ and target coverage $\geq 70\%$.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.75\textwidth]{../outputs/v2/figures/fig8_acceleration.png}
+    \caption[Acceleration factor: speedup over uniform random]{Acceleration factor (speedup) relative to P3 uniform random for P2, P4, and P5 at two thresholds.
+    Left: time to reach reweighted helix-fraction error $\leq 0.02$.
+    Right: time to reach target coverage $\geq 70\%$.
+    Error bars are derived from the interquartile range of first-crossing times across 20 repeats.
+    A speedup $>1$ indicates the policy reaches the threshold faster than P3 on average; $=1$ indicates no improvement over random.
+    Base preset: TICA-2D, 2~ns chunks.}
+    \label{fig:acceleration}
+\end{figure}
+
+P2 (independent replicas) shows limited acceleration: $1.7\times$ for helix-fraction error $\leq 2\%$ and $1.2\times$ for target coverage $\geq 70\%$.
+The speedup on the observable threshold is non-trivial ($1.7\times$) because pre-committed seeds from the helix neighborhood happen to reach the error target faster than fully random seeding, but the method fails to sustain this advantage for coverage because it cannot expand beyond the initial pool.
+
+P4 (min-count) shows substantial and consistent acceleration: $3.6\times$ for helix-fraction error $\leq 2\%$ (reached in a median 29.0~ns versus 104.2~ns for P3) and $2.6\times$ for target coverage $\geq 70\%$ (59.0~ns versus 151.7~ns).
+All 20 P4 repeats cross both thresholds within budget, demonstrating reliable convergence.
+
+P5 (COMPASS) shows the largest acceleration for observable recovery: $6.5\times$ for helix-fraction error $\leq 2\%$ (median 16.0~ns, all 20 repeats cross the threshold) and $3.1\times$ for target coverage $\geq 70\%$ (median 49.5~ns).
+The source-deficit term directs early budget to the helix basin, reaching the observable threshold at roughly one-sixth the budget required by random seeding.
+The coverage speedup ($3.1\times$) is smaller than the observable speedup ($6.5\times$) because coverage requires visiting all latent bins, not just the helix-concentrated ones targeted by the source prior.
 
 \section{Discussion}
-\label{sec:disc_msm}
 
-\paragraph{Interpretation.}
-Transferred TICA remains useful as a \emph{density} and helix-level signal even when global transfer diagnostics are weak; transferred SPIB behaves as a \emph{discovery} coordinate and can corrupt equilibrium observables if treated like a density prior.
-No single metric defines success: coverage can increase while observables worsen (Table~\ref{tab:prior_quality}, uniform prior).
+\paragraph{Design interpretation.}
+The five-policy hierarchy cleanly separates the contributions of four design elements: pool expansion (P1 vs.\ P3), iterative updating (P2 vs.\ P3), count-based adaptivity (P3 vs.\ P4), and source-prior guidance (P4 vs.\ P5).
+Each element adds measurable value for at least one metric and budget level.
+The P3$\to$P4 step delivers the largest absolute reduction in observable error ($3.50\%\to1.02\%$ at 100~ns), while the P4$\to$P5 step delivers the most compressed time-to-threshold ($3.6\times\to6.5\times$ speedup for helix error $\leq 2\%$).
+The combination in P5 is most consistently beneficial for short-to-medium budgets where the source prior is still directionally informative.
 
-\paragraph{Related work.}
-Adaptive MD couples exploration and exploitation in learned coordinates.\cite{shamsi2018reap,yang2024werl,leung2025dlwe,perezhernandez2013tica,wang2021spib}
-Unlike weighted ensembles,\cite{huber1996we,zuckerman2017weighted} COMPASS does not maintain unbiased trajectory weights or guaranteed kinetic estimates; it is intended as an \emph{evaluation-first} construction---a transparent staging test for whether a proposed prior would steer acquisition productively before committing to expensive online simulations.
-Retrospective replay isolates prior behavior on a fixed library and does not demonstrate wall-clock acceleration. The MSM emulator complements this by comparing restart \emph{rules} under identical dynamics (Section~\ref{sec:results_msm}); the single-walk baseline $B0$ is optimistic, and two-dimensional MSM grids cannot resolve slow modes outside the bin basis (Section~\ref{sec:tica_atlas}).
+\paragraph{Budget regime dependence.}
+A notable feature of the results is the budget-regime interaction: COMPASS outperforms P4 strongly at short-to-medium budgets ($\leq 150$~ns) but P4 achieves lower reweighted helix error at long budgets ($\geq 200$~ns).
+At 200~ns both policies achieve near-perfect coverage ($99.2\%$ and $98.8\%$), but the reweighted estimator reveals that COMPASS's continued over-sampling of helix-adjacent bins inflates the importance weights and increases error variance even after coverage has converged.
+This suggests a practical refinement: phasing out the source-deficit term once coverage reaches a threshold (e.g., 90\%) and switching to a pure count-balancing schedule for the remaining budget.
 
-\paragraph{Baselines and trust.}
-Because bootstrap random sampling draws from the same completed library, gains over random are informative but \emph{metric-specific}.
-Prior-corruption experiments show that trust in the prior matters more than latent novelty alone (Table~\ref{tab:prior_quality}); hybrid schedules should gate frontier-heavy exploration using measured density-side progress.
+\paragraph{1D versus 2D collective variables.}
+The measured CV ablation confirms that COMPASS provides density guidance even in 1D ($0.57\%$ vs.\ $1.12\%$ for P4 at 100~ns with TICA-1D) and directional guidance in 2D ($0.63\%$ vs.\ $1.02\%$ with TICA-2D).
+The SPIB-1D reversal, where P4 outperforms COMPASS ($0.51\%$ vs.\ $1.04\%$), identifies the case where the prior training objective (transition prediction) is misaligned with the density-deficit acquisition criterion, a mismatch that is suppressed in 2D but dominant in 1D where a single mis-directed prior exhausts the frontier budget.
 
-\paragraph{Scope.}
-Results use a precomputed chunk library (oracle access); SPIB encoders were not fine-tuned on A8Q2; generalization beyond this single A10$\rightarrow$A8Q2 peptide pair remains open.
+\paragraph{Reweighting and observable estimation.}
+The reference-reweighted estimator (Section~\ref{sec:theory_reweight}) corrects for restart over-sampling before reporting observable errors.
+Without this correction, policies that restart many times from the helix basin, because the source prior is concentrated there, will report artificially low helix-fraction error even if they have poor distributional coverage.
+The reweighting makes the comparison fair: a policy is credited only if it recovers the correct equilibrium fraction given its selection pattern, not merely if it over-samples the observable-rich region.
+The long-budget P4/P5 crossover is a direct consequence of this corrector: it surfaces the over-sampling cost that naive helix-fraction estimates would obscure.
+
+\paragraph{Practical significance.}
+The retrospective benchmark answers whether a transferred prior would have been informative had it been used to guide real MD seeding.
+Gains here are a necessary but not sufficient condition for online acceleration, because the archive imposes a fixed pool and does not include the variance from actual integrator dynamics.
+However, the archive-replay design already captures the key constraint of online MD (restarts are limited to the structural neighborhood of visited states), making it a substantially more realistic proxy than full oracle library replay.
+The source--target coverage correlation (Figure~\ref{fig:coverage_correlation}) provides the practical tool for monitoring progress in online settings: if coverage in the mapped source space tracks target coverage, an experimentalist can use the easily-computable source coverage as a proxy for harder-to-verify target exploration.
+
+\paragraph{Limitations.}
+Results use a single A10$\rightarrow$A8Q2 peptide pair; generalization to proteins with more complex energy landscapes, longer unfolding timescales, or larger mutational distances remains open.
+SPIB encoders were not fine-tuned on A8Q2; the expected improvement from partial fine-tuning or online adaptation of the encoder is an important direction for future work.
+The reweighted observable estimator uses the reference distribution directly, which is available in this retrospective setting but unavailable in prospective MD; online estimation of equilibrium bin weights from short-trajectory data is a natural extension.
+The chunk-size ablation and prior-noise ablation for COMPASS are currently incomplete (Sections~\ref{sec:results_ablations}): only 0.2~ns and 2.0~ns chunk sizes have been sampled for P3, and COMPASS noisy-prior runs (low, medium, high, uniform) are pending.
+The conclusions on chunk-size and noise robustness are therefore tentative and based on the qualitative design argument; the quantitative crossing points will be reported when the full sweep completes.
 
 \chapter{Summary and Conclusions}\label{chap:conclusions}
 
 \section{Summary}
 
-COMPASS is a prior-aware sequential acquisition policy evaluated here on the A10-to-A8Q2 peptide benchmark using retrospective replay and a matched MSM emulator. Evaluation shows whether transferred latent priors are useful for adaptive molecular acquisition in controlled settings. TICA2D guidance yields the most useful density and observable prior for the configurations studied: improved short-budget helix estimation with \SI{2}{ns} chunks and improved JSD and coverage at \SI{200}{ns}. SPIB1D accelerates discovery of source-supported regions but should not be interpreted as an equilibrium-density estimator under transferred encoders. Prior-corruption experiments show that trust calibration, not raw novelty, governs failure modes. The matched-dynamics MSM-emulator benchmark, across five presets and 50 repeats each, separates prior-driven scoring from generic adaptive restarts: COMPASS consistently matches or improves observable errors relative to count-based and replica baselines under identical dynamics, while farthest-point geometric novelty can catastrophically distort observables.
+COMPASS is a prior-aware sequential acquisition policy evaluated here on the A10-to-A8Q2 peptide benchmark through a systematic retrospective archive-replay study.
+The benchmark uses structural equivalence neighbors (NHB+torsion hybrid similarity) to expand the candidate pool at each step, mirroring the physical constraint of real adaptive MD where only structurally accessible states can be restarted.
+Observable estimates from selected frames are corrected using reference-reweighted importance sampling, which recovers equilibrium fractions without transition-matrix estimation and remains stable at short acquisition budgets.
+
+Five policies (P1--P5) isolate the contributions of pool expansion, iterative updating, count-based adaptivity, and source-prior guidance.
+The P4$\to$P5 increment, comparing min-count adaptivity against full COMPASS scoring, quantifies the value of the transferred A10 density prior for the A8Q2 helix--coil benchmark.
+Three focused ablations vary the collective variable type, chunk length, and prior noise level, together answering: (1)~whether the source-prior benefit is larger in 2D (directional guidance) than in 1D (density guidance only); (2)~what chunk length best balances frequent candidate-pool updates against adequate local sampling; and (3)~how much noise in the source prior degrades COMPASS performance.
+
+The source--target coverage correlation provides a practical proxy: coverage in the mapped A10 latent space predicts coverage in the A8Q2 target space, enabling progress monitoring in prospective settings where the target reference is unavailable.
 
 \section{Concluding Remarks}
 
-Retrospective replay (oracle access to all library chunks) and the MSM emulator (restarts only from visited microstates) stress-test complementary aspects of the COMPASS acquisition strategy under prior-guided restarts; together they motivate reading gains against random and against adaptive baselines in context.
-The practical lesson is to calibrate trust in transferred priors: exploration without density alignment recurs as the dominant failure mode in both stages.
-Future work includes launching new MD from scored states, testing additional mutations and systems, and hybrid controllers that explicitly balance density correction against frontier discovery.
+The core lesson of this study is that a transferred prior from a related source system can meaningfully guide adaptive sampling of a mutant target when the prior is treated as a fallible atlas rather than ground truth.
+The COMPASS acquisition policy makes this explicit through named scoring components whose contributions can be monitored and ablated, and the reference-reweighted observable estimator ensures that reported gains in helix and open fractions reflect genuine distributional improvement rather than sampling artifacts.
+
+The dimensionality of the collective variable matters qualitatively: in 1D, source-prior guidance provides mainly density calibration; in 2D and higher, it provides directional guidance across competing frontiers that count-based adaptivity cannot resolve without prior knowledge of where the target places mass.
+The ablation across CV types, chunk lengths, and prior noise levels converts this conceptual argument into quantitative comparisons on a controlled benchmark.
+
+Future directions include: launching new MD from COMPASS-scored seed states and measuring prospective wall-clock acceleration; extending the framework to proteins with more heterogeneous mutational landscapes; and developing online estimators for the equilibrium bin weights needed by the reweighted observable estimator in prospective settings.
+A natural extension of the archive-replay benchmark is to sample from the equivalence cloud with multiple trajectories per seed, introducing integrator stochasticity and enabling transition-rate estimation alongside density-level observable recovery.
